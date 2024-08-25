@@ -53,6 +53,7 @@ pub struct UiArea<SID: SpriteId> {
     pub y_max: f32,
     pub z: ZOrder,
     pub sprite: SID,
+    pub enabled: bool,
 }
 
 struct InternalUiArea<SID: SpriteId> {
@@ -85,7 +86,8 @@ struct StoredSprite {
 struct Vertex {
     pos: [f32; 2],
     tex: [f32; 2],
-    id: u32,
+    // Most significant bit is set if the area is enabled, the rest is the handle id
+    packed_enable_and_id: u32,
 }
 
 impl Vertex {
@@ -1054,6 +1056,7 @@ impl<SID: SpriteId> Stgi<SID> {
             // Update the area's vertices
             let stored_sprite = self.stored_sprites.get(&area.area.sprite).unwrap();
             let atlas_size = self.atlases[stored_sprite.atlas_index].texture.size().width as f32;
+            let packed_enable_and_id = ((area.area.enabled as u32) << 31) | handle.id.get();
             let vertices = [
                 Vertex {
                     pos: [area.area.x_min, area.area.y_min],
@@ -1061,7 +1064,7 @@ impl<SID: SpriteId> Stgi<SID> {
                         (stored_sprite.allocation.rectangle.min.x + 1) as f32 / atlas_size,
                         (stored_sprite.allocation.rectangle.min.y + 1) as f32 / atlas_size,
                     ],
-                    id: handle.id.get(),
+                    packed_enable_and_id,
                 },
                 Vertex {
                     pos: [area.area.x_min, area.area.y_max],
@@ -1071,7 +1074,7 @@ impl<SID: SpriteId> Stgi<SID> {
                             as f32
                             / atlas_size,
                     ],
-                    id: handle.id.get(),
+                    packed_enable_and_id,
                 },
                 Vertex {
                     pos: [area.area.x_max, area.area.y_min],
@@ -1081,7 +1084,7 @@ impl<SID: SpriteId> Stgi<SID> {
                             / atlas_size,
                         (stored_sprite.allocation.rectangle.min.y + 1) as f32 / atlas_size,
                     ],
-                    id: handle.id.get(),
+                    packed_enable_and_id,
                 },
                 Vertex {
                     pos: [area.area.x_max, area.area.y_max],
@@ -1093,7 +1096,7 @@ impl<SID: SpriteId> Stgi<SID> {
                             as f32
                             / atlas_size,
                     ],
-                    id: handle.id.get(),
+                    packed_enable_and_id,
                 },
             ];
             let atlas_index = self.stored_sprites[&area.area.sprite].atlas_index;

@@ -9,7 +9,7 @@ var<uniform> window_size: WindowSizeUniform;
 struct VertexInput {
     @location(0) position: vec2<f32>,
     @location(1) tex_coords: vec2<f32>,
-    @location(2) area_id: u32,
+    @location(2) enabled_and_id: u32,
 }
 
 struct VertexOutput {
@@ -27,7 +27,9 @@ fn vs_main(
     let y = 1.0 - input.position.y / f32(window_size.size.y) * 2.0;
     out.clip_position = vec4<f32>(x, y, 0.0, 1.0);
     out.tex_coords = input.tex_coords;
-    out.area_id = input.area_id;
+    out.clip_position.x *= f32(input.enabled_and_id >> 31);
+    out.clip_position.y *= f32(input.enabled_and_id >> 31);
+    out.area_id = input.enabled_and_id & 0x7FFFFFFF;
     return out;
 }
 

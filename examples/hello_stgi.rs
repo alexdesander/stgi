@@ -147,6 +147,7 @@ impl State {
             y_max: 20.0 + 44.0,
             z: ZOrder::First,
             sprite: SpriteId::Logo,
+            enabled: true,
         });
 
         let title_width = window_width / 3.0;
@@ -157,6 +158,7 @@ impl State {
             y_max: 60.0 + title_width / 7.5,
             z: ZOrder::Second,
             sprite: SpriteId::Title,
+            enabled: true,
         });
         let area_spawn_smiley = stgi.add_area(UiArea {
             x_min: window_width - 487.0,
@@ -165,6 +167,7 @@ impl State {
             y_max: window_height,
             z: ZOrder::Fourth,
             sprite: SpriteId::SpawnSmiley,
+            enabled: true,
         });
 
         Self {
@@ -302,6 +305,7 @@ impl State {
             y_max: y + 64.0,
             z,
             sprite: smiley,
+            enabled: true,
         }));
     }
 }
