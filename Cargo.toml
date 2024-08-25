@@ -1,0 +1,23 @@
+[package]
+name = "stgi"
+version = "0.1.0"
+edition = "2021"
+description = "Sprite and Text based Graphical Interface. A glorified sprite and glyph renderer to cook up sprite based game uis. Pixelperfect cursor detection included, transparency supported."
+authors = ["Alexdesander"]
+repository = "https://github.com/alexdesander/stgi"
+keywords = ["gamedev", "ui", "sprites", "text", "gui"]
+categories = ["game-development", "graphics", "gui", "rendering"]
+readme = "README.md"
+license = "Apache-2.0"
+
+[dependencies]
+ahash = { version = "0.8.11", features = ["no-rng"] }
+bytemuck = { version = "1.17.0", features = ["derive"] }
+etagere = "0.2"
+image = "0.25"
+wgpu = "22"
+
+[dev-dependencies]
+pollster = "0.3"
+winit = "0.30"
+rand = "0.5"
