@@ -683,7 +683,6 @@ impl<SID: SpriteId> Stgi<SID> {
 
     /// Adds a new UiArea to the STGI instance. This UiArea will be drawn on the screen.
     /// Returns a handle to the UiArea.
-    /// If the handle and all it's clones are dropped, the UiArea is automatically removed.
     pub fn add_area(&mut self, area: UiArea<SID>) -> UiAreaHandle {
         let handle = UiAreaHandle { id: self.next_id };
         self.next_id = self.next_id.checked_add(1).unwrap();
