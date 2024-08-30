@@ -1,11 +1,9 @@
 // MINIMAL WGPU AND WINIT USAGE EXAMPLE + STGI
 // Most code is taken from https://sotrh.github.io/learn-wgpu and the winit documentation.
-use std::sync::Arc;
+use std::{num::NonZeroU32, sync::Arc, time::Instant};
 
-use ahash::HashSet;
 use pollster::FutureExt;
-use rand::{thread_rng, Rng};
-use stgi::{Stgi, UiArea, UiAreaHandle, ZOrder};
+use stgi::{builder::StgiBuilder, Stgi, Text, UiArea, UiAreaHandle, ZOrder};
 use wgpu::{
     Adapter, Device, Instance, InstanceDescriptor, MemoryHints, Queue, Surface,
     SurfaceConfiguration, SurfaceTargetUnsafe,
@@ -14,6 +12,7 @@ use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::Key,
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -21,24 +20,28 @@ use winit::{
 enum SpriteId {
     Logo,
     Title,
+    TitleBackground,
     TitleHovered,
     SpawnSmiley,
     SpawnSmileyHovered,
     Smiley1,
     Smiley2,
     Smiley3,
+    Blocky,
+    LoadingSpinner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FontId {
+    Default,
 }
 
 struct State {
     // STGI
-    stgi: Stgi<SpriteId>,
-    area_logo: UiAreaHandle,
-    area_title: UiAreaHandle,
-    area_spawn_smiley: UiAreaHandle,
-    smiley_areas: HashSet<UiAreaHandle>,
-
-    // UI UPDATE
-    last_hovered: Option<UiAreaHandle>,
+    last_animation_tick: Instant,
+    stgi: Stgi<SpriteId, FontId>,
+    handle_title_background: UiAreaHandle,
+    handle_spinner: UiAreaHandle,
 
     // WGPU
     _instance: Instance,
@@ -79,7 +82,7 @@ impl State {
                     label: None,
                     memory_hints: MemoryHints::Performance,
                 },
-                None, // Trace path
+                None,
             )
             .block_on()
             .unwrap();
@@ -104,79 +107,85 @@ impl State {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         // Create STGI instance
-        let mut stgi = Stgi::<SpriteId>::new(
-            size.width,
-            size.height,
-            device.clone(),
-            queue.clone(),
-            &surface_config,
+        let mut stgi = StgiBuilder::new();
+        stgi.add_font(FontId::Default, include_bytes!("m5x7.ttf"));
+        stgi.add_inanimate_sprite(
+            SpriteId::Logo,
+            image::load_from_memory(include_bytes!("../logo.png"))
+                .unwrap()
+                .to_rgba8(),
+        );
+        stgi.add_inanimate_sprite(
+            SpriteId::Title,
+            image::load_from_memory(include_bytes!("title.png"))
+                .unwrap()
+                .to_rgba8(),
+        );
+        stgi.add_animated_sprite(
+            SpriteId::Blocky,
+            image::load_from_memory(include_bytes!("blocky.png"))
+                .unwrap()
+                .to_rgba8(),
+            None,
+        );
+        stgi.add_animated_sprite(
+            SpriteId::LoadingSpinner,
+            image::load_from_memory(include_bytes!("loading_spinner.png"))
+                .unwrap()
+                .to_rgba8(),
+            None,
+        );
+        stgi.add_animated_sprite(
+            SpriteId::TitleBackground,
+            image::load_from_memory(include_bytes!("title_background.png"))
+                .unwrap()
+                .to_rgba8(),
+            Some(NonZeroU32::new(128).unwrap()),
         );
 
-        // Add sprites
-        fn add_sprite(stgi: &mut Stgi<SpriteId>, id: SpriteId, bytes: &[u8]) {
-            stgi.add_sprite(id, image::load_from_memory(bytes).unwrap().to_rgba8());
-        }
-        add_sprite(&mut stgi, SpriteId::Logo, include_bytes!("../logo.png"));
-        add_sprite(&mut stgi, SpriteId::Title, include_bytes!("title.png"));
-        add_sprite(
-            &mut stgi,
-            SpriteId::TitleHovered,
-            include_bytes!("title_hovered.png"),
-        );
-        add_sprite(
-            &mut stgi,
-            SpriteId::SpawnSmiley,
-            include_bytes!("spawn_smiley.png"),
-        );
-        add_sprite(
-            &mut stgi,
-            SpriteId::SpawnSmileyHovered,
-            include_bytes!("spawn_smiley_hovered.png"),
-        );
-        add_sprite(&mut stgi, SpriteId::Smiley1, include_bytes!("smiley_1.png"));
-        add_sprite(&mut stgi, SpriteId::Smiley2, include_bytes!("smiley_2.png"));
-        add_sprite(&mut stgi, SpriteId::Smiley3, include_bytes!("smiley_3.png"));
-
-        // Add Ui Areas
+        let mut stgi = stgi.build(&device, &queue, size.width, size.height, surface_format);
         let window_width = size.width as f32;
         let window_height = size.height as f32;
-        let area_logo = stgi.add_area(UiArea {
+        stgi.add_area(UiArea {
             x_min: 20.0,
             x_max: 20.0 + 127.0,
             y_min: 20.0,
             y_max: 20.0 + 44.0,
-            z: ZOrder::First,
-            sprite: SpriteId::Logo,
-            enabled: true,
-        });
-
-        let title_width = window_width / 3.0;
-        let area_title = stgi.add_area(UiArea {
-            x_min: (window_width - title_width) / 2.0,
-            x_max: (window_width - title_width) / 2.0 + title_width,
-            y_min: 60.0,
-            y_max: 60.0 + title_width / 7.5,
             z: ZOrder::Second,
-            sprite: SpriteId::Title,
+            sprite: Some(SpriteId::Logo),
             enabled: true,
+            text: None,
         });
-        let area_spawn_smiley = stgi.add_area(UiArea {
-            x_min: window_width - 487.0,
-            x_max: window_width,
-            y_min: window_height - 55.0,
-            y_max: window_height,
-            z: ZOrder::Fourth,
-            sprite: SpriteId::SpawnSmiley,
+        let handle_title_background = stgi.add_area(UiArea {
+            x_min: (window_width - 128.0 * 4.0) / 2.0,
+            x_max: (window_width + 128.0 * 4.0) / 2.0,
+            y_min: 100.0,
+            y_max: 100.0 + 14.0 * 4.0,
+            z: ZOrder::Second,
+            sprite: None,
             enabled: true,
+            text: Some(Text {
+                font: FontId::Default,
+                size: 64,
+                text: "STGI EXAMPLE".to_string(),
+            }),
+        });
+        let handle_spinner = stgi.add_area(UiArea {
+            x_min: window_width - 20.0 - 16.0 * 4.0,
+            x_max: window_width - 20.0,
+            y_min: 20.0,
+            y_max: 20.0 + 16.0 * 4.0,
+            z: ZOrder::First,
+            sprite: Some(SpriteId::LoadingSpinner),
+            enabled: true,
+            text: None,
         });
 
         Self {
+            last_animation_tick: Instant::now(),
             stgi,
-            area_logo,
-            area_title,
-            area_spawn_smiley,
-            smiley_areas: HashSet::default(),
-            last_hovered: None,
+            handle_title_background,
+            handle_spinner,
             _instance: instance,
             surface,
             _adapter: adapter,
@@ -191,31 +200,11 @@ impl State {
     /// You could integrate a layout engine based on flexbox for example.
     /// For the sake of simplicity we just hardcode a bunch of stuff.
     fn update_ui(&mut self) {
-        let hovered = self.stgi.currently_hovered_area();
-
-        // Stuff that we do every frame
-        if let Some(hovered_handle) = hovered {
-            if hovered_handle == self.area_logo {
-                println!("STGI logo is hovered.");
-            }
+        self.stgi.update(&self.device, &self.queue);
+        if self.last_animation_tick.elapsed().as_millis() > 50 {
+            self.last_animation_tick = Instant::now();
+            self.stgi.next_animation_frame(&self.queue);
         }
-        // If the hovered area did not change, we skip the rest.
-        if self.last_hovered == hovered {
-            self.last_hovered = hovered;
-            return;
-        }
-        // Stuff that we do only when the hovered area changes
-        if hovered == Some(self.area_logo) {
-            println!("STGI logo is hovered FOR THE FIRST.");
-        }
-        if hovered == Some(self.area_spawn_smiley) {
-            let area_spawn_smiley = self.stgi.area_mut(self.area_spawn_smiley).unwrap();
-            area_spawn_smiley.sprite = SpriteId::SpawnSmileyHovered;
-        } else {
-            let area_spawn_smiley = self.stgi.area_mut(self.area_spawn_smiley).unwrap();
-            area_spawn_smiley.sprite = SpriteId::SpawnSmiley;
-        }
-        self.last_hovered = hovered;
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
@@ -223,22 +212,15 @@ impl State {
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
-            self.stgi.resize(new_size.width, new_size.height);
+            self.stgi
+                .resize(&self.queue, new_size.width as f32, new_size.height as f32);
+            let area = self.stgi.area_mut(self.handle_title_background).unwrap();
+            area.x_min = (new_size.width as f32 - 128.0 * 4.0) / 2.0;
+            area.x_max = (new_size.width as f32 + 128.0 * 4.0) / 2.0;
 
-            // Resize the ui areas
-            let window_width = new_size.width as f32;
-            let title_width = window_width / 3.0;
-
-            let area_title = self.stgi.area_mut(self.area_title).unwrap();
-            area_title.x_min = (window_width - title_width) / 2.0;
-            area_title.x_max = (window_width - title_width) / 2.0 + title_width;
-            area_title.y_max = 60.0 + title_width / 7.5;
-
-            let area_spawn_smiley = self.stgi.area_mut(self.area_spawn_smiley).unwrap();
-            area_spawn_smiley.x_min = window_width - 487.0;
-            area_spawn_smiley.x_max = window_width;
-            area_spawn_smiley.y_min = new_size.height as f32 - 55.0;
-            area_spawn_smiley.y_max = new_size.height as f32;
+            let area = self.stgi.area_mut(self.handle_spinner).unwrap();
+            area.x_min = new_size.width as f32 - 20.0 - 16.0 * 4.0;
+            area.x_max = new_size.width as f32 - 20.0;
         }
     }
 
@@ -253,7 +235,7 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
-        let stgi_encoder;
+        let stgi_cmds;
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -274,39 +256,17 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            stgi_encoder = self.stgi.render(&mut render_pass);
+            stgi_cmds = self
+                .stgi
+                .render(&self.device, &self.queue, &mut render_pass);
+            //stgi_encoder = self.stgi.render(&mut render_pass);
         }
-        self.queue.submit([encoder.finish(), stgi_encoder]);
+        self.queue.submit([encoder.finish(), stgi_cmds]);
         output.present();
         self.stgi.post_render_work();
+        //self.stgi.post_render_work();
+        println!("Hovered: {:?}", self.stgi.currently_hovered_area());
         Ok(())
-    }
-
-    fn spawn_smiley(&mut self) {
-        let mut rng = thread_rng();
-        let window_width = self.surface_config.width as f32;
-        let window_height = self.surface_config.height as f32;
-        let smiley = match rng.gen_range(0, 3) {
-            0 => SpriteId::Smiley1,
-            1 => SpriteId::Smiley2,
-            _ => SpriteId::Smiley3,
-        };
-        let z = match rng.gen_range(0, 3) {
-            0 => ZOrder::First,
-            1 => ZOrder::Second,
-            _ => ZOrder::Third,
-        };
-        let x = rng.gen_range(0.0, window_width - 64.0);
-        let y = rng.gen_range(0.0, window_height - 64.0);
-        self.smiley_areas.insert(self.stgi.add_area(UiArea {
-            x_min: x,
-            x_max: x + 64.0,
-            y_min: y,
-            y_max: y + 64.0,
-            z,
-            sprite: smiley,
-            enabled: true,
-        }));
     }
 }
 
@@ -337,26 +297,18 @@ impl ApplicationHandler for State {
             // update cursor position
             WindowEvent::CursorMoved { position, .. } => {
                 self.stgi
-                    .update_cursor_position(position.x as u32, position.y as u32);
-                println!(
-                    "Currently hovered: {:?}",
-                    self.stgi.currently_hovered_area()
-                );
+                    .set_cursor_pos(position.x as u32, position.y as u32);
             }
             WindowEvent::MouseInput { state, button, .. } => match state {
                 winit::event::ElementState::Pressed => {
-                    if button == winit::event::MouseButton::Left {
-                        if let Some(hovered) = self.stgi.currently_hovered_area() {
-                            if hovered == self.area_spawn_smiley {
-                                self.spawn_smiley();
-                                return;
-                            }
-                            if self.smiley_areas.contains(&hovered) {
-                                self.stgi.remove_area(hovered);
-                                self.smiley_areas.remove(&hovered);
-                            }
-                        }
-                    }
+                    if button == winit::event::MouseButton::Left {}
+                }
+                _ => {}
+            },
+            WindowEvent::KeyboardInput { event, .. } => match event.logical_key.as_ref() {
+                Key::Character("o") => {
+                    let area = self.stgi.area_mut(self.handle_title_background).unwrap();
+                    area.enabled = !area.enabled;
                 }
                 _ => {}
             },
