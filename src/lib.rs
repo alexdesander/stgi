@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::{fmt::Debug, num::NonZeroU32};
 
 use ahash::HashMap;
+use builder::StgiBuilder;
 use bytemuck::{Pod, Zeroable};
 use text::{FontId, TextRenderer};
 use util::{BufferInitDescriptor, DeviceExt};
@@ -15,6 +16,7 @@ pub mod text;
 pub trait SpriteId: Clone + Eq + Debug + Hash {}
 impl<T> SpriteId for T where T: Clone + Eq + Debug + Hash {}
 
+/// The order in which the areas are rendered, meaning: Fourth will be rendered on top of Third, etc.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Default)]
 pub enum ZOrder {
     First,
@@ -35,11 +37,13 @@ impl ZOrder {
     }
 }
 
+/// A handle to a UiArea, used to identify the area. This is cheap to clone (copy).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct UiAreaHandle {
     id: NonZeroU32,
 }
 
+/// A UiArea is a rectangular area on the screen that can be rendered with a sprite and/or text.
 #[derive(Debug, Clone)]
 pub struct UiArea<S: SpriteId, F: FontId> {
     pub x_min: f32,
@@ -52,6 +56,7 @@ pub struct UiArea<S: SpriteId, F: FontId> {
     pub text: Option<Text<F>>,
 }
 
+/// Text inside a UiArea
 #[derive(Debug, Clone)]
 pub struct Text<F: FontId> {
     pub font: F,
@@ -134,6 +139,7 @@ struct InstanceBuffer {
     size: u32,
 }
 
+/// The main struct for the library, this is where all the magic happens.
 pub struct Stgi<S: SpriteId, F: FontId> {
     text_renderer: TextRenderer<F>,
 
@@ -179,6 +185,13 @@ pub struct Stgi<S: SpriteId, F: FontId> {
 }
 
 impl<S: SpriteId, F: FontId> Stgi<S, F> {
+    /// All sprites and fonts must be registered before creating a STGI instance, for performance reasons.
+    /// That's why there is a builder pattern to create a STGI instance.
+    pub fn builder() -> StgiBuilder<S, F> {
+        StgiBuilder::new()
+    }
+
+    /// Adds a new UIArea to the STGI instance. To edit the area later, use the returned handle and 
     pub fn add_area(&mut self, area: UiArea<S, F>) -> UiAreaHandle {
         let handle = UiAreaHandle {
             id: self.next_area_id,
@@ -201,10 +214,13 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         handle
     }
 
+    /// Gets a reference to a UiArea by its handle
     pub fn area(&self, handle: UiAreaHandle) -> Option<&UiArea<S, F>> {
         self.ui_areas.get(&handle).map(|area| &area.area)
     }
 
+    /// Gets a mutable reference to a UiArea by its handle.
+    /// This automatically marks the area as dirty, so it will be recalculated in the next frame.
     pub fn area_mut(&mut self, handle: UiAreaHandle) -> Option<&mut UiArea<S, F>> {
         if let Some(area) = self.ui_areas.get_mut(&handle) {
             match self.dirty_areas.binary_search(&handle) {
@@ -218,6 +234,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         None
     }
 
+    /// Advances all sprite animations by one frame.
     pub fn next_animation_frame(&mut self, queue: &Queue) {
         self.animation_frame += 1;
         self.uniform_data.current_frame = self.animation_frame;
@@ -228,11 +245,13 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         );
     }
 
+    /// Updates the cursor position used for cursor picking. Call this when the mouse cursor moves.
     pub fn set_cursor_pos(&mut self, x: u32, y: u32) {
         self.cursor_pos_uniform = [x, y];
         self.cursor_moved = true;
     }
 
+    /// Returns the currently hovered area, if any.
     pub fn currently_hovered_area(&self) -> Option<UiAreaHandle> {
         self.cursor_picking_result
     }
@@ -265,6 +284,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         }
     }
 
+    /// Call this every time the window is resized.
     pub fn resize(&mut self, queue: &Queue, new_width: f32, new_height: f32) {
         self.uniform_data.window_width = new_width;
         self.uniform_data.window_height = new_height;
@@ -275,6 +295,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         );
     }
 
+    /// Call this every frame to update the UI, best before rendering.
     pub fn update(&mut self, device: &Device, queue: &Queue) {
         let needs_text_update = !self.dirty_areas.is_empty();
         self.handle_dirty_areas(device, queue);
@@ -296,6 +317,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         }
     }
 
+    /// Renders the UI. Returns a command buffer that should be submitted to the queue.
     #[must_use]
     pub fn render(
         &mut self,

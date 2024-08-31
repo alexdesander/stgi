@@ -41,11 +41,13 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
         }
     }
 
+    /// Adds a font to the builder, raw is the bytes of the font file
     pub fn add_font(&mut self, font_id: F, raw: &[u8]) {
         let font = Font::from_bytes(raw, FontSettings::default()).unwrap();
         self.fonts.insert(font_id, font);
     }
 
+    /// Adds a static sprite to the builder
     pub fn add_inanimate_sprite(&mut self, sprite_id: S, sprite: ImageBuffer<Rgba<u8>, Vec<u8>>) {
         assert!(
             !self.present_ids.contains(&sprite_id),
@@ -63,6 +65,8 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
         self.present_ids.insert(sprite_id);
     }
 
+    /// Adds an animated sprite to the builder. All frames must be laid out horizontally in the sprite sheet.
+    /// If the sprite width is not provided, it is assumed to be the same as the height of the sprite sheet.
     pub fn add_animated_sprite(
         &mut self,
         sprite_id: S,
