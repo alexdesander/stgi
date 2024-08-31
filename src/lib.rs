@@ -165,6 +165,7 @@ pub struct Stgi<S: SpriteId, F: FontId> {
     next_area_id: NonZeroU32,
     ui_areas: HashMap<UiAreaHandle, InternalUiArea<S, F>>,
     dirty_areas: Vec<UiAreaHandle>,
+    areas_to_remove: Vec<UiAreaHandle>,
 
     animation_frame: u32,
 
@@ -217,6 +218,25 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
     /// Gets a reference to a UiArea by its handle
     pub fn area(&self, handle: UiAreaHandle) -> Option<&UiArea<S, F>> {
         self.ui_areas.get(&handle).map(|area| &area.area)
+    }
+
+    pub fn remove_area(&mut self, area: UiAreaHandle) {
+        match self.areas_to_remove.binary_search(&area) {
+            Ok(_) => {}
+            Err(index) => {
+                self.areas_to_remove.insert(index, area);
+            }
+        }
+    }
+
+    /// Removes all areas from the STGI instance.
+    pub fn clear(&mut self) {
+        self.ui_areas.clear();
+        self.dirty_areas.clear();
+        self.areas_to_remove.clear();
+        for buffer in self.instance_buffers.iter_mut() {
+            *buffer = None;
+        }
     }
 
     /// Gets a mutable reference to a UiArea by its handle.
@@ -415,6 +435,43 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
     }
 
     fn handle_dirty_areas(&mut self, device: &Device, queue: &Queue) {
+        for handle in self.areas_to_remove.drain(..) {
+            let Some(area) = self.ui_areas.remove(&handle) else {
+                continue;
+            };
+            if let Some(index) = area.instances_index {
+                let index = index as usize;
+                let instance_buffer = self.instance_buffers[area.old_z.to_usize()]
+                    .as_mut()
+                    .unwrap();
+                if instance_buffer.size == 1 {
+                    // We are removing the only element
+                    assert_eq!(index, 0);
+                    self.instance_buffers[area.old_z.to_usize()] = None;
+                } else if index as u32 == instance_buffer.size - 1 {
+                    // We are removing the last element
+                    instance_buffer.size -= 1;
+                    instance_buffer.order.pop();
+                    instance_buffer.staging.pop();
+                } else {
+                    // We are removing an element somewhere else
+                    instance_buffer.order.swap_remove(index);
+                    instance_buffer.staging.swap_remove(index);
+                    instance_buffer.size -= 1;
+                    let swapped_area = self
+                        .ui_areas
+                        .get_mut(&instance_buffer.order[index])
+                        .unwrap();
+                    swapped_area.instances_index = Some(index as u32);
+                    queue.write_buffer(
+                        &instance_buffer.buffer,
+                        (index * std::mem::size_of::<Instance>()) as u64,
+                        bytemuck::cast_slice(&instance_buffer.staging),
+                    );
+                }
+            }
+        }
+
         for handle in self.dirty_areas.drain(..) {
             let Some(area) = self.ui_areas.get_mut(&handle) else {
                 continue;
