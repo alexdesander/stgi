@@ -143,7 +143,14 @@ impl State {
             Some(NonZeroU32::new(128).unwrap()),
         );
 
-        let mut stgi = stgi.build(&device, &queue, size.width, size.height, surface_format);
+        let mut stgi = stgi.build(
+            &device,
+            &queue,
+            size.width,
+            size.height,
+            surface_format,
+            8192 * 8192,
+        );
         let window_width = size.width as f32;
         let window_height = size.height as f32;
         stgi.add_area(UiArea {

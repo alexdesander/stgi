@@ -191,7 +191,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         StgiBuilder::new()
     }
 
-    /// Adds a new UIArea to the STGI instance. To edit the area later, use the returned handle and 
+    /// Adds a new UIArea to the STGI instance. To edit the area later, use the returned handle and
     pub fn add_area(&mut self, area: UiArea<S, F>) -> UiAreaHandle {
         let handle = UiAreaHandle {
             id: self.next_area_id,

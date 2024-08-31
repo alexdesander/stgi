@@ -319,7 +319,8 @@ impl<F: FontId> TextRenderer<F> {
                 break;
             }
         }
-        let (atlas_index, allocation) = allocation.expect("Glyph atlas overflow");
+        let (atlas_index, allocation) = allocation
+            .expect("Glyph atlas overflow, try increasing the atlas area in StgiBuilder::build()");
 
         queue.write_texture(
             wgpu::ImageCopyTexture {

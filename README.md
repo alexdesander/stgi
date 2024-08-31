@@ -8,7 +8,7 @@ Sprite and Text based Graphical Interface. A glorified sprite and text renderer 
 
 Basically, STGI allows you to define ui areas and put a texture and text on them. It also detects if the cursor hovers over non-transparent parts of the texture. This allows pixel perfect mouse hit detection for sprite based user interfaces.
 
-STGI is fairly well optimized, with a main focus on static sprites. It also supports animated sprites (not yet) and rendering text (not yet).
+STGI is fairly well optimized, with a main focus on static sprites. It also supports animated sprites and rendering text.
 
 ## Demo
 ![hello_stgi example](./showcase.png)
@@ -21,8 +21,8 @@ STGI is fairly well optimized, with a main focus on static sprites. It also supp
 - **Well optimized**
 - **No native-only wgpu features used (good for wasm)**
 - **Windowing library independend**
-- **Integrated text layout and rendering (NOT YET IMPLEMENTED)**
-- **Supports animated sprites (NOT YET IMPLEMENTED)**
+- **Integrated text layout and rendering**
+- **Supports animated sprites**
 
 ## Examples
 To run the example in the repository, run the following command:

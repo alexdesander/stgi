@@ -94,6 +94,10 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
         self.present_ids.insert(sprite_id);
     }
 
+    /// The min_glyph_atlas_area is the minimum area of the atlas texture (2d arraytexture) that will be used for the glyph atlas.
+    /// This should be big enough to hold all the glyphs that will be used in the text rendering (all glyphs are packet into a glyph atlas).
+    /// If the area is too small, the text rendering will fail.
+    /// Suggested size: 8192 * 8192
     pub fn build(
         &mut self,
         device: &Device,
@@ -101,6 +105,7 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
         window_width: u32,
         window_height: u32,
         surface_format: TextureFormat,
+        min_glyph_atlas_area: u32,
     ) -> Stgi<S, F> {
         let (atlas_frames, sprites) = self.create_atlas(device);
 
@@ -531,7 +536,7 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
         let text_renderer = TextRenderer::<F>::new(
             device,
             surface_format,
-            8192 * 8192,
+            min_glyph_atlas_area,
             &uniform_bind_group_layout,
             self.fonts.clone(),
         );
