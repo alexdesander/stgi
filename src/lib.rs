@@ -317,7 +317,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
 
     /// Call this every frame to update the UI, best before rendering.
     pub fn update(&mut self, device: &Device, queue: &Queue) {
-        let needs_text_update = !self.dirty_areas.is_empty();
+        let needs_text_update = !self.dirty_areas.is_empty() || !self.areas_to_remove.is_empty();
         self.handle_dirty_areas(device, queue);
         if needs_text_update {
             self.text_renderer.update(
