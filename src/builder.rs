@@ -1,9 +1,8 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use ahash::{HashMap, HashSet};
-use etagere::size2;
 use fontdue::{Font, FontSettings};
-use guillotiere::{Rectangle, SimpleAtlasAllocator};
+use guillotiere::{size2, Rectangle, SimpleAtlasAllocator};
 use image::{GenericImage, GenericImageView, ImageBuffer, Rgba};
 use util::BufferInitDescriptor;
 use wgpu::{util::DeviceExt, *};
