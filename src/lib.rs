@@ -180,6 +180,7 @@ pub struct Stgi<S: SpriteId, F: FontId> {
     cursor_pos_uniform_buffer: Buffer,
     cursor_picking_result_staging_buffer: Arc<Buffer>,
     cursor_picking_result_storage_buffer: Buffer,
+    cursor_picking_compute_bind_group_layout: BindGroupLayout,
     cursor_picking_compute_bind_group: BindGroup,
     cursor_picking_result_sender: Sender<u32>,
     cursor_picking_result_receiver: Receiver<u32>,
@@ -307,7 +308,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
     }
 
     /// Call this every time the window is resized.
-    pub fn resize(&mut self, queue: &Queue, new_width: f32, new_height: f32) {
+    pub fn resize(&mut self, device: &Device, queue: &Queue, new_width: f32, new_height: f32) {
         self.uniform_data.window_width = new_width;
         self.uniform_data.window_height = new_height;
         queue.write_buffer(
@@ -315,11 +316,50 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
             0,
             bytemuck::cast_slice(&[self.uniform_data]),
         );
+        self.cursor_picking_texture = device.create_texture(&TextureDescriptor {
+            label: Some("STGI Cursor Picking Texture"),
+            size: Extent3d {
+                width: new_width as u32,
+                height: new_height as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R32Uint,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.cursor_picking_texture_view = self
+            .cursor_picking_texture
+            .create_view(&TextureViewDescriptor::default());
+        self.cursor_picking_compute_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Stgi cursor picking compute bind group"),
+            layout: &self.cursor_picking_compute_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: self
+                        .cursor_picking_result_storage_buffer
+                        .as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::TextureView(&self.cursor_picking_texture_view),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: self.cursor_pos_uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
     }
 
     /// Call this every frame to update the UI, best before rendering.
     pub fn update(&mut self, device: &Device, queue: &Queue) {
-        let needs_text_update = !self.dirty_areas.is_empty() || !self.areas_to_remove.is_empty() || self.recently_cleared;
+        let needs_text_update = !self.dirty_areas.is_empty()
+            || !self.areas_to_remove.is_empty()
+            || self.recently_cleared;
         self.handle_dirty_areas(device, queue);
         if needs_text_update {
             self.recently_cleared = false;

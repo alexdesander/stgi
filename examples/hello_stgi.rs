@@ -219,8 +219,12 @@ impl State {
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
-            self.stgi
-                .resize(&self.queue, new_size.width as f32, new_size.height as f32);
+            self.stgi.resize(
+                &self.device,
+                &self.queue,
+                new_size.width as f32,
+                new_size.height as f32,
+            );
             let area = self.stgi.area_mut(self.handle_title_background).unwrap();
             area.x_min = (new_size.width as f32 - 128.0 * 4.0) / 2.0;
             area.x_max = (new_size.width as f32 + 128.0 * 4.0) / 2.0;

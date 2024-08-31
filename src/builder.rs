@@ -575,6 +575,7 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
             cursor_moved: false,
             cursor_pos_uniform,
             cursor_pos_uniform_buffer,
+            cursor_picking_compute_bind_group_layout,
             cursor_picking_compute_bind_group,
             cursor_picking_result: None,
             cursor_picking_result_staging_buffer,
