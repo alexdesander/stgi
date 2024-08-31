@@ -565,6 +565,7 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
             ui_areas: HashMap::default(),
             dirty_areas: Vec::new(),
             areas_to_remove: Vec::new(),
+            recently_cleared: false,
 
             animation_frame: 0,
             cursor_picking_texture,

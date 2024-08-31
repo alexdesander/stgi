@@ -166,6 +166,7 @@ pub struct Stgi<S: SpriteId, F: FontId> {
     ui_areas: HashMap<UiAreaHandle, InternalUiArea<S, F>>,
     dirty_areas: Vec<UiAreaHandle>,
     areas_to_remove: Vec<UiAreaHandle>,
+    recently_cleared: bool,
 
     animation_frame: u32,
 
@@ -237,6 +238,7 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
         for buffer in self.instance_buffers.iter_mut() {
             *buffer = None;
         }
+        self.recently_cleared = true;
     }
 
     /// Gets a mutable reference to a UiArea by its handle.
@@ -317,9 +319,10 @@ impl<S: SpriteId, F: FontId> Stgi<S, F> {
 
     /// Call this every frame to update the UI, best before rendering.
     pub fn update(&mut self, device: &Device, queue: &Queue) {
-        let needs_text_update = !self.dirty_areas.is_empty() || !self.areas_to_remove.is_empty();
+        let needs_text_update = !self.dirty_areas.is_empty() || !self.areas_to_remove.is_empty() || self.recently_cleared;
         self.handle_dirty_areas(device, queue);
         if needs_text_update {
+            self.recently_cleared = false;
             self.text_renderer.update(
                 device,
                 queue,
