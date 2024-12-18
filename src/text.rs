@@ -17,6 +17,8 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use wgpu::*;
 
+use crate::{AlignHorizontal, AlignVertical};
+
 use super::{SpriteId, UiArea, UiAreaHandle};
 
 pub trait FontId: Copy + Eq + Debug + Hash {}
@@ -65,9 +67,9 @@ pub struct TextRenderer<F: FontId> {
     fonts: HashMap<F, Font>,
     atlas_allocators: Vec<SimpleAtlasAllocator>,
     atlas_texture: Texture,
-    atlas_texture_view: TextureView,
-    atlas_sampler: Sampler,
-    atlas_bind_group_layout: BindGroupLayout,
+    _atlas_texture_view: TextureView,
+    _atlas_sampler: Sampler,
+    _atlas_bind_group_layout: BindGroupLayout,
     atlas_bind_group: BindGroup,
     render_pipeline: RenderPipeline,
     // (font_id, font_size, character) -> RasterizedGlyph
@@ -180,7 +182,7 @@ impl<F: FontId> TextRenderer<F> {
             layout: Some(&render_pipeline_layout),
             vertex: VertexState {
                 module: &render_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[GlyphVertex::desc()],
                 compilation_options: Default::default(),
             },
@@ -201,7 +203,7 @@ impl<F: FontId> TextRenderer<F> {
             },
             fragment: Some(FragmentState {
                 module: &render_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
                     format,
                     blend: Some(BlendState::ALPHA_BLENDING),
@@ -230,7 +232,7 @@ impl<F: FontId> TextRenderer<F> {
             layout: Some(&cursor_picking_pipeline_layout),
             vertex: VertexState {
                 module: &cursor_picking_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[GlyphVertex::desc()],
                 compilation_options: Default::default(),
             },
@@ -251,7 +253,7 @@ impl<F: FontId> TextRenderer<F> {
             },
             fragment: Some(FragmentState {
                 module: &cursor_picking_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
                     format: TextureFormat::R32Uint,
                     blend: None,
@@ -281,9 +283,9 @@ impl<F: FontId> TextRenderer<F> {
             fonts,
             atlas_allocators,
             atlas_texture,
-            atlas_texture_view,
-            atlas_sampler,
-            atlas_bind_group_layout,
+            _atlas_texture_view: atlas_texture_view,
+            _atlas_sampler: atlas_sampler,
+            _atlas_bind_group_layout: atlas_bind_group_layout,
             atlas_bind_group,
             render_pipeline,
             rasterized_glyphs: HashMap::default(),
@@ -385,8 +387,16 @@ impl<F: FontId> TextRenderer<F> {
                     y: area.y_min,
                     max_width: Some(area.x_max - area.x_min),
                     max_height: Some(area.y_max - area.y_min),
-                    horizontal_align: HorizontalAlign::Center,
-                    vertical_align: VerticalAlign::Middle,
+                    horizontal_align: match text.align_hor {
+                        AlignHorizontal::Left => HorizontalAlign::Left,
+                        AlignHorizontal::Center => HorizontalAlign::Center,
+                        AlignHorizontal::Right => HorizontalAlign::Right,
+                    },
+                    vertical_align: match text.align_ver {
+                        AlignVertical::Top => VerticalAlign::Top,
+                        AlignVertical::Center => VerticalAlign::Middle,
+                        AlignVertical::Bottom => VerticalAlign::Bottom,
+                    },
                     line_height: 1.0,
                     wrap_style: WrapStyle::Word,
                     wrap_hard_breaks: true,

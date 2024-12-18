@@ -56,12 +56,28 @@ pub struct UiArea<S: SpriteId, F: FontId> {
     pub text: Option<Text<F>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AlignHorizontal {
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AlignVertical {
+    Top,
+    Center,
+    Bottom,
+}
+
 /// Text inside a UiArea
 #[derive(Debug, Clone)]
 pub struct Text<F: FontId> {
     pub font: F,
     pub size: u16,
     pub text: String,
+    pub align_hor: AlignHorizontal,
+    pub align_ver: AlignVertical,
 }
 
 struct InternalUiArea<S: SpriteId, F: FontId> {
@@ -144,11 +160,11 @@ pub struct Stgi<S: SpriteId, F: FontId> {
     text_renderer: TextRenderer<F>,
 
     sprite_indices: HashMap<S, u32>,
-    offset_table: Buffer,
-    allocation_table: Buffer,
-    atlas_texture: Texture,
-    atlas_view: TextureView,
-    atlas_sampler: Sampler,
+    _offset_table: Buffer,
+    _allocation_table: Buffer,
+    _atlas_texture: Texture,
+    _atlas_view: TextureView,
+    _atlas_sampler: Sampler,
     atlas_bind_group: BindGroup,
 
     index_buffer: Buffer,

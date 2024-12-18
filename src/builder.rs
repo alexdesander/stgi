@@ -338,13 +338,13 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
             layout: Some(&render_pipeline_layout),
             vertex: VertexState {
                 module: &render_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[Vertex::desc(), super::Instance::desc()],
                 compilation_options: PipelineCompilationOptions::default(),
             },
             fragment: Some(FragmentState {
                 module: &render_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(ColorTargetState {
                     format: surface_format,
                     blend: Some(BlendState::ALPHA_BLENDING),
@@ -403,13 +403,13 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
                 layout: Some(&cursor_picking_render_pipeline_layout),
                 vertex: VertexState {
                     module: &cursor_picking_render_shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[Vertex::desc(), super::Instance::desc()],
                     compilation_options: PipelineCompilationOptions::default(),
                 },
                 fragment: Some(FragmentState {
                     module: &cursor_picking_render_shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
                     targets: &[Some(ColorTargetState {
                         format: TextureFormat::R32Uint,
                         blend: None,
@@ -526,7 +526,7 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
                 label: Some("STGI Cursor Picking Compute Pipeline"),
                 layout: Some(&cursor_picking_compute_pipeline_layout),
                 module: &cursor_picking_compute_shader,
-                entry_point: "main",
+                entry_point: Some("main"),
                 compilation_options: Default::default(),
                 cache: None,
             });
@@ -544,11 +544,11 @@ impl<S: SpriteId, F: FontId> StgiBuilder<S, F> {
         Stgi {
             text_renderer,
             sprite_indices,
-            offset_table,
-            allocation_table,
-            atlas_texture,
-            atlas_view,
-            atlas_sampler,
+            _offset_table: offset_table,
+            _allocation_table: allocation_table,
+            _atlas_texture: atlas_texture,
+            _atlas_view: atlas_view,
+            _atlas_sampler: atlas_sampler,
             atlas_bind_group,
 
             index_buffer,

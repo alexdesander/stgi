@@ -3,7 +3,7 @@
 use std::{num::NonZeroU32, sync::Arc, time::Instant};
 
 use pollster::FutureExt;
-use stgi::{builder::StgiBuilder, Stgi, Text, UiArea, UiAreaHandle, ZOrder};
+use stgi::{builder::StgiBuilder, AlignHorizontal, AlignVertical, Stgi, Text, UiArea, UiAreaHandle, ZOrder};
 use wgpu::{
     Adapter, Device, Instance, InstanceDescriptor, MemoryHints, Queue, Surface,
     SurfaceConfiguration, SurfaceTargetUnsafe,
@@ -21,12 +21,6 @@ enum SpriteId {
     Logo,
     Title,
     TitleBackground,
-    TitleHovered,
-    SpawnSmiley,
-    SpawnSmileyHovered,
-    Smiley1,
-    Smiley2,
-    Smiley3,
     Blocky,
     LoadingSpinner,
 }
@@ -152,7 +146,7 @@ impl State {
             8192 * 8192,
         );
         let window_width = size.width as f32;
-        let window_height = size.height as f32;
+        let _window_height = size.height as f32;
         stgi.add_area(UiArea {
             x_min: 20.0,
             x_max: 20.0 + 127.0,
@@ -175,6 +169,8 @@ impl State {
                 font: FontId::Default,
                 size: 64,
                 text: "STGI EXAMPLE".to_string(),
+                align_hor: AlignHorizontal::Center,
+                align_ver: AlignVertical::Center,
             }),
         });
         let handle_spinner = stgi.add_area(UiArea {
