@@ -1,9 +1,9 @@
 use guillotiere::{Allocation, AtlasAllocator, euclid::Size2D};
 use image::RgbaImage;
 use wgpu::{
-    CommandBuffer, CommandEncoderDescriptor, Device, Extent3d, Origin3d, TexelCopyTextureInfo,
-    Texture, TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureView,
+    CommandEncoderDescriptor, Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView,
 };
 
 pub struct AtlasAllocation {
@@ -22,7 +22,7 @@ pub struct Atlas {
 impl Atlas {
     pub fn new(width: u32, height: u32, device: &Device) -> Self {
         let texture = device.create_texture(&TextureDescriptor {
-            label: None,
+            label: Some("STGI Atlas Texture"),
             size: Extent3d {
                 width,
                 height,
@@ -56,29 +56,30 @@ impl Atlas {
     pub fn insert_sprite(
         &mut self,
         device: &Device,
+        queue: &Queue,
         image: &RgbaImage,
-    ) -> (AtlasAllocation, Option<CommandBuffer>) {
-        self._insert_sprite(device, image, false)
+    ) -> AtlasAllocation {
+        self._insert_sprite(device, queue, image, false)
     }
 
     fn _insert_sprite(
         &mut self,
         device: &Device,
+        queue: &Queue,
         image: &RgbaImage,
         was_recursive_call: bool,
-    ) -> (AtlasAllocation, Option<CommandBuffer>) {
+    ) -> AtlasAllocation {
         let image_size = Size2D::new(image.width() as i32, image.height() as i32);
         for (atlas_id, allocator) in self.allocators.iter_mut().enumerate() {
             let Some(allocation) = allocator.allocate(image_size) else {
                 continue;
             };
-            return (
-                AtlasAllocation {
-                    atlas_id,
-                    allocation,
-                },
-                None,
-            );
+            let allocation = AtlasAllocation {
+                atlas_id,
+                allocation,
+            };
+            self.upload_image(queue, &allocation, image);
+            return allocation;
         }
         if was_recursive_call {
             panic!(
@@ -86,18 +87,44 @@ impl Atlas {
                 image.dimensions()
             );
         }
-        let cmds = self.increase_atlas_depth(device);
-        (self._insert_sprite(device, image, true).0, Some(cmds))
+        self.increase_atlas_depth(device, queue);
+        self._insert_sprite(device, queue, image, true)
     }
 
-    fn increase_atlas_depth(&mut self, device: &Device) -> CommandBuffer {
+    fn upload_image(&mut self, queue: &Queue, allocation: &AtlasAllocation, image: &RgbaImage) {
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: Origin3d {
+                    x: allocation.allocation.rectangle.min.x as u32,
+                    y: allocation.allocation.rectangle.min.y as u32,
+                    z: allocation.atlas_id as u32,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.as_raw(),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * image.width()),
+                rows_per_image: Some(image.height()),
+            },
+            Extent3d {
+                width: image.width(),
+                height: image.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn increase_atlas_depth(&mut self, device: &Device, queue: &Queue) {
         self.allocators.push(AtlasAllocator::new(Size2D::new(
             self.size.width as i32,
             self.size.height as i32,
         )));
 
         let new_texture = device.create_texture(&TextureDescriptor {
-            label: None,
+            label: Some("STGI Atlas Texture"),
             size: Extent3d {
                 width: self.texture.width(),
                 height: self.texture.height(),
@@ -135,6 +162,6 @@ impl Atlas {
         self.texture_view = self
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        encoder.finish()
+        queue.submit(std::iter::once(encoder.finish()));
     }
 }

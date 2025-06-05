@@ -3,7 +3,7 @@ use std::hash::Hash;
 use ahash::HashMap;
 use guillotiere::euclid::Size2D;
 use image::RgbaImage;
-use wgpu::{CommandBuffer, Device};
+use wgpu::{CommandBuffer, Device, Queue};
 
 use crate::atlas::{Atlas, AtlasAllocation};
 
@@ -27,17 +27,18 @@ impl<S: Eq + Hash> Stgi<S> {
         }
     }
 
-    pub fn set_atlas_size(&mut self, _new_size: Size2D<i32, i32>) {
+    pub fn set_atlas_size(&mut self, width: u32, height: u32) {
         todo!()
     }
 
     pub fn add_sprite(
         &mut self,
         device: &Device,
+        queue: &Queue,
         sprite_id: S,
         raw_image: RgbaImage,
-    ) -> Option<CommandBuffer> {
-        let (allocation, cmds) = self.atlas.insert_sprite(device, &raw_image);
+    ) {
+        let allocation = self.atlas.insert_sprite(device, queue, &raw_image);
 
         self.sprites.insert(
             sprite_id,
@@ -46,7 +47,5 @@ impl<S: Eq + Hash> Stgi<S> {
                 allocation,
             },
         );
-
-        cmds
     }
 }
