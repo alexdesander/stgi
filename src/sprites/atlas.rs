@@ -127,7 +127,11 @@ impl Atlas {
         }
 
         let frame_width = image.width() / frames as u32;
-        let sprite_size = Size2D::new(frame_width as i32, image.height() as i32);
+        const PADDING: i32 = 1;
+        let sprite_size = Size2D::new(
+            frame_width as i32 + PADDING * 2,
+            image.height() as i32 + PADDING * 2,
+        );
 
         let mut first_atlas_to_try = 0;
         let mut current_frame = 0;
@@ -152,8 +156,8 @@ impl Atlas {
                             texture: &self.texture,
                             mip_level: 0,
                             origin: Origin3d {
-                                x: atlas_allocation.allocation.rectangle.min.x as u32,
-                                y: atlas_allocation.allocation.rectangle.min.y as u32,
+                                x: (atlas_allocation.allocation.rectangle.min.x + PADDING) as u32,
+                                y: (atlas_allocation.allocation.rectangle.min.y + PADDING) as u32,
                                 z: atlas_allocation.atlas_id,
                             },
                             aspect: wgpu::TextureAspect::All,

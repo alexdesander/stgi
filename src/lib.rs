@@ -12,18 +12,15 @@ use wgpu::{
 };
 
 use crate::{
-    atlas::{Atlas, AtlasAllocation},
+    sprites::{Sprite, atlas::Atlas},
+    text::TextRenderer,
     ui_element::{UiElement, UiElementHandle},
 };
 
-mod atlas;
 mod rectangle;
-mod ui_element;
-
-struct Sprite {
-    raw_image: RgbaImage,
-    allocations: Vec<AtlasAllocation>,
-}
+pub mod sprites;
+pub mod text;
+pub mod ui_element;
 
 // ALLOCATION TABLE STUFF
 #[repr(C)]
@@ -94,14 +91,25 @@ impl QuadInstance {
     }
 }
 
-pub struct Stgi<S: Clone + Eq + Hash> {
+pub struct Stgi<S: Clone + Eq + Hash, F: Clone + Eq + Hash> {
+    // General
+    screen_size: (u32, u32),
+
+    // Sprites
     atlas: Atlas,
     sprites: HashMap<S, Sprite>,
+    render_pipeline: RenderPipeline,
+
+    // Text
+    text_renderer: TextRenderer<F>,
+
+    // Elements
     next_id: NonZeroU32,
-    elements: HashMap<NonZeroU32, UiElement<S>>,
+    elements: HashMap<NonZeroU32, UiElement<S, F>>,
     dirty_elements: Vec<NonZeroU32>,
     needs_table_rebuild: bool,
 
+    // Sprite Buffers
     vertex_buffer: Buffer,
     index_buffer: Buffer,
     instances: Vec<QuadInstance>,
@@ -109,8 +117,8 @@ pub struct Stgi<S: Clone + Eq + Hash> {
     instance_buffer_capacity: usize,
     instance_buffer: Buffer,
 
+    // Sprite Tables
     sprite_to_offset_table_index: HashMap<S, u32>,
-
     /// In elements, not bytes
     offset_table_capacity: usize,
     /// In elements, not bytes
@@ -122,18 +130,20 @@ pub struct Stgi<S: Clone + Eq + Hash> {
     allocation_table_len: usize,
     allocation_table: Buffer,
 
+    // Animation
     update_frame_uniform: bool,
     global_frame_counter: u32,
     frame_uniform_buffer: Buffer,
 
+    // Bind Groups
     tables_bind_group_layout: wgpu::BindGroupLayout,
     tables_bind_group: BindGroup,
-    render_pipeline: RenderPipeline,
 }
 
-impl<S: Clone + Eq + Hash> Stgi<S> {
-    pub fn new(device: &Device, surface_format: TextureFormat) -> Self {
+impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
+    pub fn new(device: &Device, surface_format: TextureFormat, screen_size: (u32, u32)) -> Self {
         let atlas = Atlas::new(4096, 4096, device);
+        let text_renderer = TextRenderer::new(device, surface_format);
 
         // CREATE BUFFERS
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -288,19 +298,19 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
         });
 
         Self {
+            screen_size,
             atlas,
             sprites: HashMap::default(),
+            render_pipeline,
+            text_renderer,
             next_id: NonZeroU32::new(1).unwrap(),
             elements: HashMap::default(),
             dirty_elements: Vec::new(),
-
             vertex_buffer,
             index_buffer,
-
             instances: Vec::new(),
             instance_buffer_capacity,
             instance_buffer,
-
             sprite_to_offset_table_index: HashMap::default(),
             offset_table_capacity,
             offset_table_len,
@@ -309,19 +319,22 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
             allocation_table_len,
             allocation_table,
             needs_table_rebuild: false,
-
             update_frame_uniform: true,
             global_frame_counter: 0,
             frame_uniform_buffer,
-
             tables_bind_group_layout,
             tables_bind_group,
-            render_pipeline,
         }
     }
 
-    pub fn set_atlas_size(&mut self, width: u32, height: u32) {
-        todo!()
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.screen_size = (width, height);
+        // Mark all elements as dirty so text can be re-layouted
+        self.dirty_elements.extend(self.elements.keys());
+    }
+
+    pub fn add_font(&mut self, id: F, data: &'static [u8]) {
+        self.text_renderer.add_font(id, data);
     }
 
     pub fn add_sprite(
@@ -362,18 +375,23 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
         id
     }
 
-    pub fn edit_ui_element(&mut self, id: UiElementHandle) -> Option<&mut UiElement<S>> {
+    pub fn edit_ui_element(&mut self, id: UiElementHandle) -> Option<&mut UiElement<S, F>> {
         self.dirty_elements.push(id.id);
         self.elements.get_mut(&id.id)
     }
 
-    pub fn draw(&mut self, device: &Device, queue: &Queue, render_pass: &mut RenderPass) {
+    pub fn draw<'pass>(
+        &'pass mut self,
+        device: &Device,
+        queue: &Queue,
+        render_pass: &mut RenderPass<'pass>,
+    ) {
         if self.needs_table_rebuild {
             self.needs_table_rebuild = false;
             self.rebuild_tables(device, queue);
         }
 
-        self.update_dirty_elements(device, queue);
+        self.update_render_data(device, queue);
 
         // Update frame uniform
         if self.update_frame_uniform {
@@ -387,14 +405,19 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
             );
         }
 
-        // Actually draw
-        render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.tables_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.atlas.atlas_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        render_pass.draw_indexed(0..6, 0, 0..self.instances.len() as u32);
+        // Draw Sprites
+        if !self.instances.is_empty() {
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.tables_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.atlas.atlas_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.draw_indexed(0..6, 0, 0..self.instances.len() as u32);
+        }
+
+        // Draw Text
+        self.text_renderer.draw(render_pass);
     }
 
     /// Rebuilds offset and allocation table
@@ -416,11 +439,13 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
             });
 
             for allocation in &sprite.allocations {
+                let rect = &allocation.allocation.rectangle;
+                // Account for 1px padding.
                 allocation_table.push(AllocationTableEntry {
-                    x_min: allocation.allocation.rectangle.min.x as f32 / atlas_width,
-                    x_max: allocation.allocation.rectangle.max.x as f32 / atlas_width,
-                    y_min: allocation.allocation.rectangle.min.y as f32 / atlas_height,
-                    y_max: allocation.allocation.rectangle.max.y as f32 / atlas_height,
+                    x_min: (rect.min.x + 1) as f32 / atlas_width,
+                    x_max: (rect.max.x - 1) as f32 / atlas_width,
+                    y_min: (rect.min.y + 1) as f32 / atlas_height,
+                    y_max: (rect.max.y - 1) as f32 / atlas_height,
                     atlas_index: allocation.atlas_id,
                 });
             }
@@ -479,40 +504,37 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
         queue.write_buffer(&self.allocation_table, 0, cast_slice(&allocation_table));
     }
 
-    fn update_dirty_elements(&mut self, device: &Device, queue: &Queue) {
+    fn update_render_data(&mut self, device: &Device, queue: &Queue) {
         if self.dirty_elements.is_empty() {
             return;
         }
-        // TEMPORARY SOLUTION: Rebuild all instances
+
+        // TEMPORARY SOLUTION: Rebuild all instances and text
         self.instances.clear();
-        self.dirty_elements.clear();
 
         for (_id, element) in &self.elements {
-            let Some(sprite) = element.sprite.as_ref() else {
-                continue;
-            };
-            let Some(offset_table_index) = self.sprite_to_offset_table_index.get(sprite) else {
-                continue;
-            };
+            if let Some(sprite) = element.sprite.as_ref() {
+                if let Some(offset_table_index) = self.sprite_to_offset_table_index.get(sprite) {
+                    let rect = &element.rectangle;
+                    let x_min = rect.top_left.x * 2.0 - 1.0;
+                    let x_max = rect.bottom_right.x * 2.0 - 1.0;
+                    let y_max = 1.0 - (rect.top_left.y * 2.0);
+                    let y_min = 1.0 - (rect.bottom_right.y * 2.0);
 
-            let rect = &element.rectangle;
-            let x_min = rect.top_left.x * 2.0 - 1.0;
-            let x_max = rect.bottom_right.x * 2.0 - 1.0;
-            let y_max = 1.0 - (rect.top_left.y * 2.0);
-            let y_min = 1.0 - (rect.bottom_right.y * 2.0);
-
-            self.instances.push(QuadInstance {
-                sprite_index: *offset_table_index,
-                x_min,
-                x_max,
-                y_min,
-                y_max,
-                frame_offset: element.frame_offset,
-            });
+                    self.instances.push(QuadInstance {
+                        sprite_index: *offset_table_index,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                        frame_offset: element.frame_offset,
+                    });
+                }
+            }
         }
 
         if self.instance_buffer_capacity < self.instances.len() {
-            self.instance_buffer_capacity *= 2;
+            self.instance_buffer_capacity = self.instances.len().next_power_of_two();
             self.instance_buffer = device.create_buffer(&BufferDescriptor {
                 label: Some("STGI Instance Buffer"),
                 size: (self.instance_buffer_capacity as u64)
@@ -521,7 +543,14 @@ impl<S: Clone + Eq + Hash> Stgi<S> {
                 mapped_at_creation: false,
             });
         }
+        if !self.instances.is_empty() {
+            queue.write_buffer(&self.instance_buffer, 0, cast_slice(&self.instances));
+        }
 
-        queue.write_buffer(&self.instance_buffer, 0, cast_slice(&self.instances));
+        // Update text
+        self.text_renderer
+            .update(device, queue, self.screen_size, self.elements.values());
+
+        self.dirty_elements.clear();
     }
 }

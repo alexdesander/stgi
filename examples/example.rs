@@ -1,7 +1,12 @@
+// stgi/examples/example.rs
+
 use std::{sync::Arc, time::Instant};
 
 use pollster::FutureExt;
-use stgi::Stgi;
+use stgi::{
+    Stgi,
+    text::{HorizontalAlign, Text, VerticalAlign, WrapStyle},
+};
 use wgpu::{
     Adapter, Backends, Device, Instance, InstanceDescriptor, MemoryHints, Queue, Surface,
     SurfaceConfiguration, SurfaceTargetUnsafe, Trace,
@@ -15,7 +20,7 @@ use winit::{
 
 struct State {
     // STGI
-    stgi: Stgi<String>,
+    stgi: Stgi<String, &'static str>,
     last_animation_tick: Instant,
 
     // WGPU STUFF
@@ -80,8 +85,10 @@ impl State {
         };
 
         // STGI STUFF
-        let mut stgi: Stgi<String> = Stgi::new(&device, surface_format);
-        //stgi.set_atlas_size(2048, 2048);
+        let mut stgi: Stgi<String, &str> =
+            Stgi::new(&device, surface_format, (size.width, size.height));
+        stgi.add_font("dejavu", include_bytes!("assets/m5x7.ttf"));
+
         stgi.add_sprite(
             &device,
             &queue,
@@ -107,6 +114,43 @@ impl State {
         ui_element.rectangle.scale(0.5);
         ui_element.frame_offset = 3;
 
+        // Multi-colored text
+        let multi_color_text_handle = stgi.new_ui_element();
+        let multi_color_text_element = stgi.edit_ui_element(multi_color_text_handle).unwrap();
+        multi_color_text_element.rectangle.top_left.y = 0.4;
+        multi_color_text_element.rectangle.bottom_right.y = 0.6;
+        multi_color_text_element.text = Some(Text {
+            content: vec![
+                ("Multi-".to_string(), [1.0, 0.0, 0.0, 1.0]),   // Red
+                ("colored ".to_string(), [0.0, 1.0, 0.0, 1.0]), // Green
+                ("text!".to_string(), [0.0, 0.0, 1.0, 1.0]),    // Blue
+            ],
+            font: "dejavu",
+            size: 48.0,
+            h_align: HorizontalAlign::Center,
+            v_align: VerticalAlign::Center,
+            wrap: WrapStyle::Word,
+        });
+
+        // Left-aligned wrapping text
+        let text_handle = stgi.new_ui_element();
+        let text_element = stgi.edit_ui_element(text_handle).unwrap();
+        text_element.rectangle.top_left.x = 0.1;
+        text_element.rectangle.top_left.y = 0.6;
+        text_element.rectangle.bottom_right.x = 0.9;
+        text_element.rectangle.bottom_right.y = 0.9;
+        text_element.text = Some(Text {
+            content: vec![(
+                "Hello, STGI! This is some left-aligned text that should wrap nicely based on word boundaries.".to_string(),
+                [1.0, 1.0, 0.0, 1.0]
+            )],
+            font: "dejavu",
+            size: 24.0,
+            h_align: HorizontalAlign::Left,
+            v_align: VerticalAlign::Top,
+            wrap: WrapStyle::Word,
+        });
+
         Self {
             stgi,
             last_animation_tick: Instant::now(),
@@ -125,11 +169,12 @@ impl State {
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
+            self.stgi.resize(new_size.width, new_size.height);
         }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        if self.last_animation_tick.elapsed().as_millis() > 1000 {
+        if self.last_animation_tick.elapsed().as_millis() > 100 {
             self.last_animation_tick = Instant::now();
             self.stgi.advance_animations();
         }
@@ -186,16 +231,22 @@ impl ApplicationHandler for State {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => {
-                let size = self.window.inner_size();
-                self.resize(size);
+            WindowEvent::Resized(new_size) => {
+                self.resize(new_size);
             }
             WindowEvent::RedrawRequested => {
+                // Redraw the application.
+                //
+                // It's important to note that Self::render() can cause an out of memory error, and we need to
+                // handle that case.
                 match self.render() {
                     Ok(_) => {}
+                    // Reconfigure the surface if lost
                     Err(wgpu::SurfaceError::Lost) => self.resize(self.window.inner_size()),
+                    // The system is out of memory, we should probably quit
                     Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                    _ => {}
+                    // All other errors (Outdated, Timeout) should be resolved by the next frame
+                    Err(e) => eprintln!("{:?}", e),
                 }
                 self.window.request_redraw();
             }

@@ -1,6 +1,9 @@
 use std::num::NonZeroU32;
 
-use crate::rectangle::{Point, Rectangle};
+use crate::{
+    rectangle::{Point, Rectangle},
+    text::Text,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct UiElementHandle {
@@ -13,13 +16,14 @@ impl UiElementHandle {
     }
 }
 
-pub struct UiElement<S> {
+pub struct UiElement<S, F> {
     pub rectangle: Rectangle,
     pub sprite: Option<S>,
     pub frame_offset: u32,
+    pub text: Option<Text<F>>,
 }
 
-impl<S> UiElement<S> {
+impl<S, F> UiElement<S, F> {
     pub(crate) fn new() -> Self {
         UiElement {
             rectangle: Rectangle {
@@ -28,6 +32,7 @@ impl<S> UiElement<S> {
             },
             sprite: None,
             frame_offset: 0,
+            text: None,
         }
     }
 }
