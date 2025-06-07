@@ -1,6 +1,5 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
-use image::ImageFormat;
 use pollster::FutureExt;
 use stgi::Stgi;
 use wgpu::{
@@ -17,6 +16,7 @@ use winit::{
 struct State {
     // STGI
     stgi: Stgi<String>,
+    last_animation_tick: Instant,
 
     // WGPU STUFF
     instance: Instance,
@@ -80,21 +80,36 @@ impl State {
         };
 
         // STGI STUFF
-        let mut stgi: Stgi<String> = Stgi::new(&device);
+        let mut stgi: Stgi<String> = Stgi::new(&device, surface_format);
         //stgi.set_atlas_size(2048, 2048);
-        for _ in 0..100000 {
-            stgi.add_sprite(
-                &device,
-                &queue,
-                "smiley".into(),
-                image::load_from_memory(include_bytes!("assets/smiley.png"))
-                    .unwrap()
-                    .into_rgba8(),
-            );
-        }
+        stgi.add_sprite(
+            &device,
+            &queue,
+            "smiley".into(),
+            image::load_from_memory(include_bytes!("assets/smiley.png"))
+                .unwrap()
+                .into_rgba8(),
+            1,
+        );
+        stgi.add_sprite(
+            &device,
+            &queue,
+            "digits".into(),
+            image::load_from_memory(include_bytes!("assets/digits.png"))
+                .unwrap()
+                .into_rgba8(),
+            10,
+        );
+
+        let handle = stgi.new_ui_element();
+        let ui_element = stgi.edit_ui_element(handle).unwrap();
+        ui_element.sprite = Some("digits".into());
+        ui_element.rectangle.scale(0.5);
+        ui_element.frame_offset = 3;
 
         Self {
             stgi,
+            last_animation_tick: Instant::now(),
             instance,
             surface,
             adapter,
@@ -114,6 +129,10 @@ impl State {
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        if self.last_animation_tick.elapsed().as_millis() > 1000 {
+            self.last_animation_tick = Instant::now();
+            self.stgi.advance_animations();
+        }
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -124,7 +143,7 @@ impl State {
                 label: Some("Render Encoder"),
             });
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -143,6 +162,8 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+
+            self.stgi.draw(&self.device, &self.queue, &mut render_pass);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
