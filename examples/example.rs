@@ -1,48 +1,34 @@
-// MINIMAL WGPU AND WINIT USAGE EXAMPLE + STGI
-// Most code is taken from https://sotrh.github.io/learn-wgpu and the winit documentation.
-use std::{num::NonZeroU32, sync::Arc, time::Instant};
+// stgi/examples/example.rs
+
+use std::{sync::Arc, time::Instant};
 
 use pollster::FutureExt;
-use stgi::{builder::StgiBuilder, AlignHorizontal, AlignVertical, Stgi, Text, UiArea, UiAreaHandle, ZOrder};
+use stgi::{
+    Stgi,
+    text::{HorizontalAlign, Text, VerticalAlign, WrapStyle},
+};
 use wgpu::{
-    Adapter, Device, Instance, InstanceDescriptor, MemoryHints, Queue, Surface,
-    SurfaceConfiguration, SurfaceTargetUnsafe,
+    Adapter, Backends, Device, Instance, InstanceDescriptor, MemoryHints, Queue, Surface,
+    SurfaceConfiguration, SurfaceTargetUnsafe, Trace,
 };
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, StartCause, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::Key,
     window::{Window, WindowAttributes, WindowId},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum SpriteId {
-    Logo,
-    Title,
-    TitleBackground,
-    Blocky,
-    LoadingSpinner,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum FontId {
-    Default,
-}
-
 struct State {
     // STGI
+    stgi: Stgi<String, &'static str>,
     last_animation_tick: Instant,
-    stgi: Stgi<SpriteId, FontId>,
-    handle_title_background: UiAreaHandle,
-    handle_spinner: UiAreaHandle,
 
-    // WGPU
-    _instance: Instance,
+    // WGPU STUFF
+    instance: Instance,
     surface: Surface<'static>,
-    _adapter: Adapter,
-    device: Arc<Device>,
-    queue: Arc<Queue>,
+    adapter: Adapter,
+    device: Device,
+    queue: Queue,
     surface_config: SurfaceConfiguration,
 
     // Last because it needs to be dropped after the surface.
@@ -53,8 +39,10 @@ impl State {
     fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         // WGPU STUFF, NOTE: WGPU settings do not take wasm into account
-        let instance = Instance::new(InstanceDescriptor::default());
-        // NOTE: Surface is created unsafe, make sure surface is destroyed before window.
+        let instance = Instance::new(&InstanceDescriptor {
+            backends: Backends::PRIMARY,
+            ..Default::default()
+        });
         let surface = unsafe {
             instance
                 .create_surface_unsafe(SurfaceTargetUnsafe::from_window(&window).unwrap())
@@ -69,15 +57,13 @@ impl State {
             .block_on()
             .unwrap();
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    label: None,
-                    memory_hints: MemoryHints::Performance,
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                label: None,
+                memory_hints: MemoryHints::Performance,
+                trace: Trace::Off,
+            })
             .block_on()
             .unwrap();
         let surface_caps = surface.get_capabilities(&adapter);
@@ -98,115 +84,83 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
 
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-        // Create STGI instance
-        let mut stgi = StgiBuilder::new();
-        stgi.add_font(FontId::Default, include_bytes!("m5x7.ttf"));
-        stgi.add_inanimate_sprite(
-            SpriteId::Logo,
-            image::load_from_memory(include_bytes!("../logo.png"))
-                .unwrap()
-                .to_rgba8(),
-        );
-        stgi.add_inanimate_sprite(
-            SpriteId::Title,
-            image::load_from_memory(include_bytes!("title.png"))
-                .unwrap()
-                .to_rgba8(),
-        );
-        stgi.add_animated_sprite(
-            SpriteId::Blocky,
-            image::load_from_memory(include_bytes!("blocky.png"))
-                .unwrap()
-                .to_rgba8(),
-            None,
-        );
-        stgi.add_animated_sprite(
-            SpriteId::LoadingSpinner,
-            image::load_from_memory(include_bytes!("loading_spinner.png"))
-                .unwrap()
-                .to_rgba8(),
-            None,
-        );
-        stgi.add_animated_sprite(
-            SpriteId::TitleBackground,
-            image::load_from_memory(include_bytes!("title_background.png"))
-                .unwrap()
-                .to_rgba8(),
-            Some(NonZeroU32::new(128).unwrap()),
-        );
+        // STGI STUFF
+        let mut stgi: Stgi<String, &str> =
+            Stgi::new(&device, surface_format, (size.width, size.height));
+        stgi.add_font("dejavu", include_bytes!("assets/m5x7.ttf"));
 
-        let mut stgi = stgi.build(
+        stgi.add_sprite(
             &device,
             &queue,
-            size.width,
-            size.height,
-            surface_format,
-            8192 * 8192,
+            "smiley".into(),
+            image::load_from_memory(include_bytes!("assets/smiley.png"))
+                .unwrap()
+                .into_rgba8(),
+            1,
         );
-        let window_width = size.width as f32;
-        let _window_height = size.height as f32;
-        stgi.add_area(UiArea {
-            x_min: 20.0,
-            x_max: 20.0 + 127.0,
-            y_min: 20.0,
-            y_max: 20.0 + 44.0,
-            z: ZOrder::Second,
-            sprite: Some(SpriteId::Logo),
-            enabled: true,
-            text: None,
+        stgi.add_sprite(
+            &device,
+            &queue,
+            "digits".into(),
+            image::load_from_memory(include_bytes!("assets/digits.png"))
+                .unwrap()
+                .into_rgba8(),
+            10,
+        );
+
+        let handle = stgi.new_ui_element();
+        let ui_element = stgi.edit_ui_element(handle).unwrap();
+        ui_element.sprite = Some("digits".into());
+        ui_element.rectangle.scale(0.5);
+        ui_element.frame_offset = 3;
+
+        // Multi-colored text
+        let multi_color_text_handle = stgi.new_ui_element();
+        let multi_color_text_element = stgi.edit_ui_element(multi_color_text_handle).unwrap();
+        multi_color_text_element.rectangle.top_left.y = 0.4;
+        multi_color_text_element.rectangle.bottom_right.y = 0.6;
+        multi_color_text_element.text = Some(Text {
+            content: vec![
+                ("Multi-".to_string(), [1.0, 0.0, 0.0, 1.0]),   // Red
+                ("colored ".to_string(), [0.0, 1.0, 0.0, 1.0]), // Green
+                ("text!".to_string(), [0.0, 0.0, 1.0, 1.0]),    // Blue
+            ],
+            font: "dejavu",
+            size: 48.0,
+            h_align: HorizontalAlign::Center,
+            v_align: VerticalAlign::Center,
+            wrap: WrapStyle::Word,
         });
-        let handle_title_background = stgi.add_area(UiArea {
-            x_min: (window_width - 128.0 * 4.0) / 2.0,
-            x_max: (window_width + 128.0 * 4.0) / 2.0,
-            y_min: 100.0,
-            y_max: 100.0 + 14.0 * 4.0,
-            z: ZOrder::Second,
-            sprite: None,
-            enabled: true,
-            text: Some(Text {
-                font: FontId::Default,
-                size: 64,
-                text: "STGI EXAMPLE".to_string(),
-                align_hor: AlignHorizontal::Center,
-                align_ver: AlignVertical::Center,
-            }),
-        });
-        let handle_spinner = stgi.add_area(UiArea {
-            x_min: window_width - 20.0 - 16.0 * 4.0,
-            x_max: window_width - 20.0,
-            y_min: 20.0,
-            y_max: 20.0 + 16.0 * 4.0,
-            z: ZOrder::First,
-            sprite: Some(SpriteId::LoadingSpinner),
-            enabled: true,
-            text: None,
+
+        // Left-aligned wrapping text
+        let text_handle = stgi.new_ui_element();
+        let text_element = stgi.edit_ui_element(text_handle).unwrap();
+        text_element.rectangle.top_left.x = 0.1;
+        text_element.rectangle.top_left.y = 0.6;
+        text_element.rectangle.bottom_right.x = 0.9;
+        text_element.rectangle.bottom_right.y = 0.9;
+        text_element.text = Some(Text {
+            content: vec![(
+                "Hello, STGI! This is some left-aligned text that should wrap nicely based on word boundaries.".to_string(),
+                [1.0, 1.0, 0.0, 1.0]
+            )],
+            font: "dejavu",
+            size: 24.0,
+            h_align: HorizontalAlign::Left,
+            v_align: VerticalAlign::Top,
+            wrap: WrapStyle::Word,
         });
 
         Self {
-            last_animation_tick: Instant::now(),
             stgi,
-            handle_title_background,
-            handle_spinner,
-            _instance: instance,
+            last_animation_tick: Instant::now(),
+            instance,
             surface,
-            _adapter: adapter,
+            adapter,
             device,
             queue,
             surface_config,
             window,
-        }
-    }
-
-    /// Here we update the UI. How you do this is up to you.
-    /// You could integrate a layout engine based on flexbox for example.
-    /// For the sake of simplicity we just hardcode a bunch of stuff.
-    fn update_ui(&mut self) {
-        self.stgi.update(&self.device, &self.queue);
-        if self.last_animation_tick.elapsed().as_millis() > 50 {
-            self.last_animation_tick = Instant::now();
-            self.stgi.next_animation_frame(&self.queue);
         }
     }
 
@@ -215,24 +169,15 @@ impl State {
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
-            self.stgi.resize(
-                &self.device,
-                &self.queue,
-                new_size.width as f32,
-                new_size.height as f32,
-            );
-            let area = self.stgi.area_mut(self.handle_title_background).unwrap();
-            area.x_min = (new_size.width as f32 - 128.0 * 4.0) / 2.0;
-            area.x_max = (new_size.width as f32 + 128.0 * 4.0) / 2.0;
-
-            let area = self.stgi.area_mut(self.handle_spinner).unwrap();
-            area.x_min = new_size.width as f32 - 20.0 - 16.0 * 4.0;
-            area.x_max = new_size.width as f32 - 20.0;
+            self.stgi.resize(new_size.width, new_size.height);
         }
     }
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        self.update_ui();
+        if self.last_animation_tick.elapsed().as_millis() > 100 {
+            self.last_animation_tick = Instant::now();
+            self.stgi.advance_animations();
+        }
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -242,7 +187,6 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
-        let stgi_cmds;
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -263,20 +207,19 @@ impl State {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            stgi_cmds = self
-                .stgi
-                .render(&self.device, &self.queue, &mut render_pass);
-            //stgi_encoder = self.stgi.render(&mut render_pass);
+
+            self.stgi.draw(&self.device, &self.queue, &mut render_pass);
         }
-        self.queue.submit([encoder.finish(), stgi_cmds]);
+        self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        self.stgi.post_render_work();
-        //self.stgi.post_render_work();
-        println!("Hovered: {:?}", self.stgi.currently_hovered_area());
+
         Ok(())
     }
 }
 
+/// We only implement the `ApplicationHandler` trait for the `State` struct so that we can
+/// handle the events that are sent to the application in the `State` struct implementations.
+/// This is so we can access documentation in our code editors on the trait methods directly.
 impl ApplicationHandler for State {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
@@ -288,37 +231,25 @@ impl ApplicationHandler for State {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(_) => {
-                let size = self.window.inner_size();
-                self.resize(size);
+            WindowEvent::Resized(new_size) => {
+                self.resize(new_size);
             }
             WindowEvent::RedrawRequested => {
+                // Redraw the application.
+                //
+                // It's important to note that Self::render() can cause an out of memory error, and we need to
+                // handle that case.
                 match self.render() {
                     Ok(_) => {}
+                    // Reconfigure the surface if lost
                     Err(wgpu::SurfaceError::Lost) => self.resize(self.window.inner_size()),
+                    // The system is out of memory, we should probably quit
                     Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
-                    _ => {}
+                    // All other errors (Outdated, Timeout) should be resolved by the next frame
+                    Err(e) => eprintln!("{:?}", e),
                 }
                 self.window.request_redraw();
             }
-            // update cursor position
-            WindowEvent::CursorMoved { position, .. } => {
-                self.stgi
-                    .set_cursor_pos(position.x as u32, position.y as u32);
-            }
-            WindowEvent::MouseInput { state, button, .. } => match state {
-                winit::event::ElementState::Pressed => {
-                    if button == winit::event::MouseButton::Left {}
-                }
-                _ => {}
-            },
-            WindowEvent::KeyboardInput { event, .. } => match event.logical_key.as_ref() {
-                Key::Character("o") => {
-                    let area = self.stgi.area_mut(self.handle_title_background).unwrap();
-                    area.enabled = !area.enabled;
-                }
-                _ => {}
-            },
             _ => {}
         }
     }
@@ -353,7 +284,7 @@ impl ApplicationHandler for WinitWrapper {
         if self.window.is_none() {
             let window = Arc::new(
                 event_loop
-                    .create_window(WindowAttributes::default())
+                    .create_window(WindowAttributes::default().with_title("STGI Example"))
                     .unwrap(),
             );
             self.window = Some(window.clone());

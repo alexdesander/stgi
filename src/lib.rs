@@ -1,96 +1,59 @@
-use std::hash::Hash;
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
-use std::{fmt::Debug, num::NonZeroU32};
+use std::{hash::Hash, num::NonZeroU32};
 
 use ahash::HashMap;
-use builder::StgiBuilder;
-use bytemuck::{Pod, Zeroable};
-use text::{FontId, TextRenderer};
-use util::{BufferInitDescriptor, DeviceExt};
-use wgpu::*;
+use bytemuck::{Pod, Zeroable, cast_slice};
+use image::RgbaImage;
+use wgpu::{
+    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingType, Buffer, BufferAddress, BufferBindingType, BufferUsages,
+    Device, IndexFormat, Queue, RenderPass, RenderPipeline, ShaderStages, TextureFormat,
+    VertexAttribute, VertexBufferLayout, VertexStepMode, util::DeviceExt, vertex_attr_array,
+    wgt::BufferDescriptor,
+};
 
-pub mod builder;
+use crate::{
+    sprites::{Sprite, atlas::Atlas},
+    text::TextRenderer,
+    ui_element::{UiElement, UiElementHandle},
+};
+
+mod rectangle;
+pub mod sprites;
 pub mod text;
+pub mod ui_element;
 
-pub trait SpriteId: Clone + Eq + Debug + Hash {}
-impl<T> SpriteId for T where T: Clone + Eq + Debug + Hash {}
-
-/// The order in which the areas are rendered, meaning: Fourth will be rendered on top of Third, etc.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Default)]
-pub enum ZOrder {
-    First,
-    Second,
-    #[default]
-    Third,
-    Fourth,
+// ALLOCATION TABLE STUFF
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct AllocationTableEntry {
+    x_min: f32,
+    x_max: f32,
+    y_min: f32,
+    y_max: f32,
+    atlas_index: u32,
 }
 
-impl ZOrder {
-    fn to_usize(&self) -> usize {
-        match self {
-            ZOrder::First => 0,
-            ZOrder::Second => 1,
-            ZOrder::Third => 2,
-            ZOrder::Fourth => 3,
-        }
-    }
+// FRAME UNIFORM STUFF
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct FrameUniform {
+    current_frame: u32,
 }
 
-/// A handle to a UiArea, used to identify the area. This is cheap to clone (copy).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct UiAreaHandle {
-    id: NonZeroU32,
+// OFFSET TABLE STUFF
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct OffsetTableEntry {
+    first_frame_index: u32,
+    amount_of_frames: u32,
 }
 
-/// A UiArea is a rectangular area on the screen that can be rendered with a sprite and/or text.
-#[derive(Debug, Clone)]
-pub struct UiArea<S: SpriteId, F: FontId> {
-    pub x_min: f32,
-    pub x_max: f32,
-    pub y_min: f32,
-    pub y_max: f32,
-    pub z: ZOrder,
-    pub sprite: Option<S>,
-    pub enabled: bool,
-    pub text: Option<Text<F>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AlignHorizontal {
-    Left,
-    Center,
-    Right,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AlignVertical {
-    Top,
-    Center,
-    Bottom,
-}
-
-/// Text inside a UiArea
-#[derive(Debug, Clone)]
-pub struct Text<F: FontId> {
-    pub font: F,
-    pub size: u16,
-    pub text: String,
-    pub align_hor: AlignHorizontal,
-    pub align_ver: AlignVertical,
-}
-
-struct InternalUiArea<S: SpriteId, F: FontId> {
-    old_z: ZOrder,
-    instances_index: Option<u32>,
-    area: UiArea<S, F>,
-}
-
-/// Only for a small vertex buffer, rendering is done with instances
+// OTHER RENDERING STUFF
+/// Used to define a quad (very small vertex buffers, stgi primarily uses instancing)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct Vertex {
-    position: [f32; 2],
+    pos: [f32; 2],
 }
 
 impl Vertex {
@@ -107,16 +70,16 @@ impl Vertex {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct Instance {
+struct QuadInstance {
     sprite_index: u32,
     x_min: f32,
     x_max: f32,
     y_min: f32,
     y_max: f32,
-    area_id: u32,
+    frame_offset: u32,
 }
 
-impl Instance {
+impl QuadInstance {
     const ATTRIBS: [VertexAttribute; 6] = vertex_attr_array![1 => Uint32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32, 6 => Uint32];
     fn desc() -> VertexBufferLayout<'static> {
         use std::mem;
@@ -128,556 +91,466 @@ impl Instance {
     }
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct UniformData {
-    current_frame: u32,
-    window_width: f32,
-    window_height: f32,
-}
+pub struct Stgi<S: Clone + Eq + Hash, F: Clone + Eq + Hash> {
+    // General
+    screen_size: (u32, u32),
 
-/// A single allocation in the atlas, these reside in the allocation table
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct Allocation {
-    x_min: f32,
-    x_max: f32,
-    y_min: f32,
-    y_max: f32,
-    atlas_index: u32,
-}
-
-struct InstanceBuffer {
-    staging: Vec<Instance>,
-    order: Vec<UiAreaHandle>,
-    buffer: Buffer,
-    capacity: u32,
-    size: u32,
-}
-
-/// The main struct for the library, this is where all the magic happens.
-pub struct Stgi<S: SpriteId, F: FontId> {
-    text_renderer: TextRenderer<F>,
-
-    sprite_indices: HashMap<S, u32>,
-    _offset_table: Buffer,
-    _allocation_table: Buffer,
-    _atlas_texture: Texture,
-    _atlas_view: TextureView,
-    _atlas_sampler: Sampler,
-    atlas_bind_group: BindGroup,
-
-    index_buffer: Buffer,
-    index_buffer_size: u32,
-    vertex_buffer: Buffer,
-    // Ordered by z-index
-    instance_buffers: Vec<Option<InstanceBuffer>>,
+    // Sprites
+    atlas: Atlas,
+    sprites: HashMap<S, Sprite>,
     render_pipeline: RenderPipeline,
 
-    uniform_data: UniformData,
-    uniform_buffer: Buffer,
-    uniform_bind_group: BindGroup,
+    // Text
+    text_renderer: TextRenderer<F>,
 
-    next_area_id: NonZeroU32,
-    ui_areas: HashMap<UiAreaHandle, InternalUiArea<S, F>>,
-    dirty_areas: Vec<UiAreaHandle>,
-    areas_to_remove: Vec<UiAreaHandle>,
-    recently_cleared: bool,
+    // Elements
+    next_id: NonZeroU32,
+    elements: HashMap<NonZeroU32, UiElement<S, F>>,
+    dirty_elements: Vec<NonZeroU32>,
+    needs_table_rebuild: bool,
 
-    animation_frame: u32,
+    // Sprite Buffers
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
+    instances: Vec<QuadInstance>,
+    /// In elements, not bytes
+    instance_buffer_capacity: usize,
+    instance_buffer: Buffer,
 
-    // Cursor picking
-    cursor_picking_texture: Texture,
-    cursor_picking_texture_view: TextureView,
-    cursor_picking_render_pipeline: RenderPipeline,
-    cursor_picking_compute_pipeline: ComputePipeline,
-    cursor_moved: bool,
-    cursor_pos_uniform: [u32; 2],
-    cursor_pos_uniform_buffer: Buffer,
-    cursor_picking_result_staging_buffer: Arc<Buffer>,
-    cursor_picking_result_storage_buffer: Buffer,
-    cursor_picking_compute_bind_group_layout: BindGroupLayout,
-    cursor_picking_compute_bind_group: BindGroup,
-    cursor_picking_result_sender: Sender<u32>,
-    cursor_picking_result_receiver: Receiver<u32>,
-    cursor_picking_result: Option<UiAreaHandle>,
+    // Sprite Tables
+    sprite_to_offset_table_index: HashMap<S, u32>,
+    /// In elements, not bytes
+    offset_table_capacity: usize,
+    /// In elements, not bytes
+    offset_table_len: usize,
+    offset_table: Buffer,
+    /// In elements, not bytes
+    allocation_table_capacity: usize,
+    /// In elements, not bytes
+    allocation_table_len: usize,
+    allocation_table: Buffer,
+
+    // Animation
+    update_frame_uniform: bool,
+    global_frame_counter: u32,
+    frame_uniform_buffer: Buffer,
+
+    // Bind Groups
+    tables_bind_group_layout: wgpu::BindGroupLayout,
+    tables_bind_group: BindGroup,
 }
 
-impl<S: SpriteId, F: FontId> Stgi<S, F> {
-    /// All sprites and fonts must be registered before creating a STGI instance, for performance reasons.
-    /// That's why there is a builder pattern to create a STGI instance.
-    pub fn builder() -> StgiBuilder<S, F> {
-        StgiBuilder::new()
-    }
+impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
+    pub fn new(device: &Device, surface_format: TextureFormat, screen_size: (u32, u32)) -> Self {
+        let atlas = Atlas::new(4096, 4096, device);
+        let text_renderer = TextRenderer::new(device, surface_format);
 
-    /// Adds a new UIArea to the STGI instance. To edit the area later, use the returned handle and
-    pub fn add_area(&mut self, area: UiArea<S, F>) -> UiAreaHandle {
-        let handle = UiAreaHandle {
-            id: self.next_area_id,
-        };
-        self.next_area_id = self.next_area_id.checked_add(1).unwrap();
-        self.ui_areas.insert(
-            handle,
-            InternalUiArea {
-                old_z: area.z,
-                instances_index: None,
-                area,
-            },
-        );
-        match self.dirty_areas.binary_search(&handle) {
-            Ok(_) => {}
-            Err(index) => {
-                self.dirty_areas.insert(index, handle);
-            }
-        }
-        handle
-    }
-
-    /// Gets a reference to a UiArea by its handle
-    pub fn area(&self, handle: UiAreaHandle) -> Option<&UiArea<S, F>> {
-        self.ui_areas.get(&handle).map(|area| &area.area)
-    }
-
-    pub fn remove_area(&mut self, area: UiAreaHandle) {
-        match self.areas_to_remove.binary_search(&area) {
-            Ok(_) => {}
-            Err(index) => {
-                self.areas_to_remove.insert(index, area);
-            }
-        }
-    }
-
-    /// Removes all areas from the STGI instance.
-    pub fn clear(&mut self) {
-        self.ui_areas.clear();
-        self.dirty_areas.clear();
-        self.areas_to_remove.clear();
-        for buffer in self.instance_buffers.iter_mut() {
-            *buffer = None;
-        }
-        self.recently_cleared = true;
-    }
-
-    /// Gets a mutable reference to a UiArea by its handle.
-    /// This automatically marks the area as dirty, so it will be recalculated in the next frame.
-    pub fn area_mut(&mut self, handle: UiAreaHandle) -> Option<&mut UiArea<S, F>> {
-        if let Some(area) = self.ui_areas.get_mut(&handle) {
-            match self.dirty_areas.binary_search(&handle) {
-                Ok(_) => {}
-                Err(index) => {
-                    self.dirty_areas.insert(index, handle);
-                }
-            }
-            return Some(&mut area.area);
-        }
-        None
-    }
-
-    /// Advances all sprite animations by one frame.
-    pub fn next_animation_frame(&mut self, queue: &Queue) {
-        self.animation_frame += 1;
-        self.uniform_data.current_frame = self.animation_frame;
-        queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[self.uniform_data]),
-        );
-    }
-
-    /// Updates the cursor position used for cursor picking. Call this when the mouse cursor moves.
-    pub fn set_cursor_pos(&mut self, x: u32, y: u32) {
-        self.cursor_pos_uniform = [x, y];
-        self.cursor_moved = true;
-    }
-
-    /// Returns the currently hovered area, if any.
-    pub fn currently_hovered_area(&self) -> Option<UiAreaHandle> {
-        self.cursor_picking_result
-    }
-
-    fn update_cursor(&mut self, device: &Device, queue: &Queue) {
-        // Update cursor position
-        if self.cursor_moved {
-            self.cursor_moved = false;
-            queue.write_buffer(
-                &self.cursor_pos_uniform_buffer,
-                0,
-                bytemuck::cast_slice(&self.cursor_pos_uniform),
-            );
-        }
-
-        // Get cursor picking result
-        device.poll(wgpu::Maintain::Wait);
-        let mut cursor_picking_result = None;
-        while let Ok(id) = self.cursor_picking_result_receiver.try_recv() {
-            cursor_picking_result = Some(id);
-        }
-        if let Some(id) = cursor_picking_result {
-            if id != 0 {
-                self.cursor_picking_result = Some(UiAreaHandle {
-                    id: NonZeroU32::new(id).unwrap(),
-                });
-            } else {
-                self.cursor_picking_result = None;
-            }
-        }
-    }
-
-    /// Call this every time the window is resized.
-    pub fn resize(&mut self, device: &Device, queue: &Queue, new_width: f32, new_height: f32) {
-        self.uniform_data.window_width = new_width;
-        self.uniform_data.window_height = new_height;
-        queue.write_buffer(
-            &self.uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[self.uniform_data]),
-        );
-        self.cursor_picking_texture = device.create_texture(&TextureDescriptor {
-            label: Some("STGI Cursor Picking Texture"),
-            size: Extent3d {
-                width: new_width as u32,
-                height: new_height as u32,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::R32Uint,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        // CREATE BUFFERS
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("STGI Vertex Buffer"),
+            contents: bytemuck::cast_slice(&[
+                Vertex { pos: [0.0, 1.0] },
+                Vertex { pos: [1.0, 1.0] },
+                Vertex { pos: [1.0, 0.0] },
+                Vertex { pos: [0.0, 0.0] },
+            ]),
+            usage: BufferUsages::VERTEX,
         });
-        self.cursor_picking_texture_view = self
-            .cursor_picking_texture
-            .create_view(&TextureViewDescriptor::default());
-        self.cursor_picking_compute_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Stgi cursor picking compute bind group"),
-            layout: &self.cursor_picking_compute_bind_group_layout,
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("STGI Index Buffer"),
+            contents: bytemuck::cast_slice(&[0u16, 1, 2, 0, 2, 3]),
+            usage: BufferUsages::INDEX,
+        });
+        let instance_buffer_capacity = 128;
+        let instance_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("STGI Instance Buffer"),
+            size: 128 * std::mem::size_of::<QuadInstance>() as u64,
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let offset_table_capacity = 32;
+        let offset_table_len = 0;
+        let offset_table = device.create_buffer(&BufferDescriptor {
+            label: Some("STGI Offset Table"),
+            size: 32 * std::mem::size_of::<OffsetTableEntry>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let allocation_table_capacity = 32;
+        let allocation_table_len = 0;
+        let allocation_table = device.create_buffer(&BufferDescriptor {
+            label: Some("STGI Allocation Table"),
+            size: 32 * std::mem::size_of::<AllocationTableEntry>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // CREATE UNIFORMS
+        let frame_uniform_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("STGI Frame Uniform Buffer"),
+            size: std::mem::size_of::<FrameUniform>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // CREATE BIND GROUPS
+        let tables_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::VERTEX,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::VERTEX,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+                label: Some("Stgi tables bind group layout"),
+            });
+        let tables_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            layout: &tables_bind_group_layout,
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: self
-                        .cursor_picking_result_storage_buffer
-                        .as_entire_binding(),
+                    resource: offset_table.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: BindingResource::TextureView(&self.cursor_picking_texture_view),
+                    resource: allocation_table.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 2,
-                    resource: self.cursor_pos_uniform_buffer.as_entire_binding(),
+                    resource: frame_uniform_buffer.as_entire_binding(),
                 },
             ],
+            label: Some("Stgi tables bind group"),
         });
-    }
 
-    /// Call this every frame to update the UI, best before rendering.
-    pub fn update(&mut self, device: &Device, queue: &Queue) {
-        let needs_text_update = !self.dirty_areas.is_empty()
-            || !self.areas_to_remove.is_empty()
-            || self.recently_cleared;
-        self.handle_dirty_areas(device, queue);
-        if needs_text_update {
-            self.recently_cleared = false;
-            self.text_renderer.update(
-                device,
-                queue,
-                self.ui_areas.iter().map(|(id, area)| (id, &area.area)),
-            );
+        let render_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("STGI Render Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/render.wgsl").into()),
+        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("STGI Render Pipeline Layout"),
+                bind_group_layouts: &[&tables_bind_group_layout, &atlas.atlas_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("STGI Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &render_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc(), QuadInstance::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &render_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            screen_size,
+            atlas,
+            sprites: HashMap::default(),
+            render_pipeline,
+            text_renderer,
+            next_id: NonZeroU32::new(1).unwrap(),
+            elements: HashMap::default(),
+            dirty_elements: Vec::new(),
+            vertex_buffer,
+            index_buffer,
+            instances: Vec::new(),
+            instance_buffer_capacity,
+            instance_buffer,
+            sprite_to_offset_table_index: HashMap::default(),
+            offset_table_capacity,
+            offset_table_len,
+            offset_table,
+            allocation_table_capacity,
+            allocation_table_len,
+            allocation_table,
+            needs_table_rebuild: false,
+            update_frame_uniform: true,
+            global_frame_counter: 0,
+            frame_uniform_buffer,
+            tables_bind_group_layout,
+            tables_bind_group,
         }
     }
 
-    fn check_index_size(&mut self, device: &Device) {
-        let indices_needed = self.text_renderer.amount_indices_needed();
-        if indices_needed > self.index_buffer_size as usize {
-            let new_size = (self.index_buffer_size as usize * 2).max(indices_needed);
-            self.set_index_buffer(device, new_size);
-            self.index_buffer_size = new_size as u32;
-        }
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.screen_size = (width, height);
+        // Mark all elements as dirty so text can be re-layouted
+        self.dirty_elements.extend(self.elements.keys());
     }
 
-    /// Renders the UI. Returns a command buffer that should be submitted to the queue.
-    #[must_use]
-    pub fn render(
+    pub fn add_font(&mut self, id: F, data: &'static [u8]) {
+        self.text_renderer.add_font(id, data);
+    }
+
+    pub fn add_sprite(
         &mut self,
         device: &Device,
         queue: &Queue,
-        render_pass: &mut RenderPass,
-    ) -> CommandBuffer {
-        self.update_cursor(device, queue);
-        self.check_index_size(device);
-        render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-        render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
-        for i in 0..4 {
-            if let Some(instance_buffer) = &self.instance_buffers[i] {
-                render_pass.set_pipeline(&self.render_pipeline);
-                render_pass.set_bind_group(0, &self.atlas_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                render_pass.set_vertex_buffer(1, instance_buffer.buffer.slice(..));
-                render_pass.draw_indexed(0..6, 0, 0..instance_buffer.size);
-            }
-            self.text_renderer.render(render_pass, i);
-        }
-
-        // Render cursor picking
-        let mut cmds = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("STGI Cursor Picking Command Encoder"),
-        });
-        {
-            let mut render_pass = cmds.begin_render_pass(&RenderPassDescriptor {
-                label: Some("STGI Cursor Picking Render Pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &self.cursor_picking_texture_view,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(Color::BLACK),
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
-            render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
-            for i in 0..4 {
-                if let Some(instance_buffer) = &self.instance_buffers[i] {
-                    render_pass.set_pipeline(&self.cursor_picking_render_pipeline);
-                    render_pass.set_bind_group(0, &self.atlas_bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                    render_pass.set_vertex_buffer(1, instance_buffer.buffer.slice(..));
-                    render_pass.draw_indexed(0..6, 0, 0..instance_buffer.size);
-                }
-                self.text_renderer
-                    .render_cursor_picking(&mut render_pass, i);
+        sprite_id: S,
+        raw_image: RgbaImage,
+        frames: usize,
+    ) {
+        if let Some(sprite) = self.sprites.remove(&sprite_id) {
+            for allocation in sprite.allocations {
+                self.atlas.remove_sprite(&allocation);
             }
         }
-
-        {
-            // Compute cursor picking
-            let mut compute_pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Stgi cursor picking compute pass"),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&self.cursor_picking_compute_pipeline);
-            compute_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            compute_pass.set_bind_group(1, &self.cursor_picking_compute_bind_group, &[]);
-            compute_pass.dispatch_workgroups(1, 1, 1);
-        }
-        cmds.copy_buffer_to_buffer(
-            &self.cursor_picking_result_storage_buffer,
-            0,
-            &self.cursor_picking_result_staging_buffer,
-            0,
-            4,
+        let allocations = self.atlas.insert_sprite(device, queue, &raw_image, frames);
+        self.sprites.insert(
+            sprite_id,
+            Sprite {
+                raw_image,
+                allocations,
+            },
         );
-
-        // Compute cursor picking
-        cmds.finish()
+        self.needs_table_rebuild = true;
     }
 
-    /// Call this after submitting the command buffer returned by render().
-    pub fn post_render_work(&mut self) {
-        let _sender = self.cursor_picking_result_sender.clone();
-        let _buffer = self.cursor_picking_result_staging_buffer.clone();
-        self.cursor_picking_result_staging_buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |v| {
-                if v.is_ok() {
-                    let view = _buffer.slice(..).get_mapped_range();
-                    let id = u32::from_ne_bytes(view[0..4].try_into().unwrap());
-                    let _ = _sender.send(id);
-                    drop(view);
-                    _buffer.unmap();
-                }
+    pub fn advance_animations(&mut self) {
+        self.update_frame_uniform = true;
+        self.global_frame_counter = self.global_frame_counter.wrapping_add(1);
+    }
+
+    /// Spawns a default ui element.
+    pub fn new_ui_element(&mut self) -> UiElementHandle {
+        let id = UiElementHandle::new(self.next_id);
+        self.next_id = self.next_id.checked_add(1).unwrap();
+        self.elements.insert(id.id, UiElement::new());
+        self.dirty_elements.push(id.id);
+        id
+    }
+
+    pub fn edit_ui_element(&mut self, id: UiElementHandle) -> Option<&mut UiElement<S, F>> {
+        self.dirty_elements.push(id.id);
+        self.elements.get_mut(&id.id)
+    }
+
+    pub fn draw<'pass>(
+        &'pass mut self,
+        device: &Device,
+        queue: &Queue,
+        render_pass: &mut RenderPass<'pass>,
+    ) {
+        if self.needs_table_rebuild {
+            self.needs_table_rebuild = false;
+            self.rebuild_tables(device, queue);
+        }
+
+        self.update_render_data(device, queue);
+
+        // Update frame uniform
+        if self.update_frame_uniform {
+            self.update_frame_uniform = false;
+            queue.write_buffer(
+                &self.frame_uniform_buffer,
+                0,
+                cast_slice(&[FrameUniform {
+                    current_frame: self.global_frame_counter,
+                }]),
+            );
+        }
+
+        // Draw Sprites
+        if !self.instances.is_empty() {
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.tables_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.atlas.atlas_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            render_pass.draw_indexed(0..6, 0, 0..self.instances.len() as u32);
+        }
+
+        // Draw Text
+        self.text_renderer.draw(render_pass);
+    }
+
+    /// Rebuilds offset and allocation table
+    fn rebuild_tables(&mut self, device: &Device, queue: &Queue) {
+        self.sprite_to_offset_table_index.clear();
+        // Build buffers on cpu
+        let mut allocation_table = Vec::new();
+        let mut offset_table = Vec::new();
+
+        let atlas_width = self.atlas.size.width as f32;
+        let atlas_height = self.atlas.size.height as f32;
+
+        for (sprite_key, sprite) in &self.sprites {
+            self.sprite_to_offset_table_index
+                .insert(sprite_key.clone(), offset_table.len() as u32);
+            offset_table.push(OffsetTableEntry {
+                first_frame_index: allocation_table.len() as u32,
+                amount_of_frames: sprite.allocations.len() as u32,
             });
-    }
 
-    fn handle_dirty_areas(&mut self, device: &Device, queue: &Queue) {
-        for handle in self.areas_to_remove.drain(..) {
-            let Some(area) = self.ui_areas.remove(&handle) else {
-                continue;
-            };
-            if let Some(index) = area.instances_index {
-                let index = index as usize;
-                let instance_buffer = self.instance_buffers[area.old_z.to_usize()]
-                    .as_mut()
-                    .unwrap();
-                if instance_buffer.size == 1 {
-                    // We are removing the only element
-                    assert_eq!(index, 0);
-                    self.instance_buffers[area.old_z.to_usize()] = None;
-                } else if index as u32 == instance_buffer.size - 1 {
-                    // We are removing the last element
-                    instance_buffer.size -= 1;
-                    instance_buffer.order.pop();
-                    instance_buffer.staging.pop();
-                } else {
-                    // We are removing an element somewhere else
-                    instance_buffer.order.swap_remove(index);
-                    instance_buffer.staging.swap_remove(index);
-                    instance_buffer.size -= 1;
-                    let swapped_area = self
-                        .ui_areas
-                        .get_mut(&instance_buffer.order[index])
-                        .unwrap();
-                    swapped_area.instances_index = Some(index as u32);
-                    queue.write_buffer(
-                        &instance_buffer.buffer,
-                        (index * std::mem::size_of::<Instance>()) as u64,
-                        bytemuck::cast_slice(&instance_buffer.staging),
-                    );
-                }
+            for allocation in &sprite.allocations {
+                let rect = &allocation.allocation.rectangle;
+                // Account for 1px padding.
+                allocation_table.push(AllocationTableEntry {
+                    x_min: (rect.min.x + 1) as f32 / atlas_width,
+                    x_max: (rect.max.x - 1) as f32 / atlas_width,
+                    y_min: (rect.min.y + 1) as f32 / atlas_height,
+                    y_max: (rect.max.y - 1) as f32 / atlas_height,
+                    atlas_index: allocation.atlas_id,
+                });
             }
         }
+        self.offset_table_len = offset_table.len();
+        self.allocation_table_len = allocation_table.len();
 
-        for handle in self.dirty_areas.drain(..) {
-            let Some(area) = self.ui_areas.get_mut(&handle) else {
-                continue;
-            };
+        let mut bind_group_needs_rebuild = false;
+        // Resize buffers if needed
+        if self.offset_table_capacity < offset_table.len() {
+            self.offset_table_capacity *= 2;
+            self.offset_table = device.create_buffer(&BufferDescriptor {
+                label: Some("STGI Offset Table"),
+                size: (self.offset_table_capacity as u64)
+                    * std::mem::size_of::<OffsetTableEntry>() as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            bind_group_needs_rebuild = true;
+        }
+        if self.allocation_table_capacity < allocation_table.len() {
+            self.allocation_table_capacity *= 2;
+            self.allocation_table = device.create_buffer(&BufferDescriptor {
+                label: Some("STGI Allocation Table"),
+                size: (self.allocation_table_capacity as u64)
+                    * std::mem::size_of::<AllocationTableEntry>() as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            bind_group_needs_rebuild = true;
+        }
 
-            // If z-index changed, the area is disabled, or has no sprite then we need to remove it from the buffers first
-            if area.old_z != area.area.z || !area.area.enabled || area.area.sprite.is_none() {
-                if let Some(index) = area.instances_index {
-                    area.instances_index = None;
-                    let index = index as usize;
-                    let instance_buffer = self.instance_buffers[area.old_z.to_usize()]
-                        .as_mut()
-                        .unwrap();
-                    if instance_buffer.size == 1 {
-                        // We are removing the only element
-                        assert_eq!(index, 0);
-                        self.instance_buffers[area.old_z.to_usize()] = None;
-                    } else if index as u32 == instance_buffer.size - 1 {
-                        // We are removing the last element
-                        instance_buffer.size -= 1;
-                        instance_buffer.order.pop();
-                        instance_buffer.staging.pop();
-                    } else {
-                        // We are removing an element somewhere else
-                        instance_buffer.order.swap_remove(index);
-                        instance_buffer.staging.swap_remove(index);
-                        instance_buffer.size -= 1;
-                        let swapped_area = self
-                            .ui_areas
-                            .get_mut(&instance_buffer.order[index])
-                            .unwrap();
-                        swapped_area.instances_index = Some(index as u32);
-                        queue.write_buffer(
-                            &instance_buffer.buffer,
-                            (index * std::mem::size_of::<Instance>()) as u64,
-                            bytemuck::cast_slice(&instance_buffer.staging),
-                        );
-                    }
-                }
-            }
+        if bind_group_needs_rebuild {
+            self.tables_bind_group = device.create_bind_group(&BindGroupDescriptor {
+                layout: &self.tables_bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: self.offset_table.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: self.allocation_table.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: self.frame_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+                label: Some("Stgi tables bind group"),
+            });
+        }
 
-            let Some(area) = self.ui_areas.get_mut(&handle) else {
-                continue;
-            };
-            // Update the instance data
-            if area.area.enabled && area.area.sprite.is_some() {
-                if let Some(index) = area.instances_index {
-                    // Overwrite the instance data
-                    let instance_buffer = self.instance_buffers[area.area.z.to_usize()]
-                        .as_mut()
-                        .unwrap();
-                    let Some(sprite_index) =
-                        self.sprite_indices.get(area.area.sprite.as_ref().unwrap())
-                    else {
-                        unreachable!("Sprite: {:?} not registered", area.area.sprite);
-                    };
-                    instance_buffer.staging[index as usize] = Instance {
-                        sprite_index: *sprite_index,
-                        x_min: area.area.x_min,
-                        x_max: area.area.x_max,
-                        y_min: area.area.y_min,
-                        y_max: area.area.y_max,
-                        area_id: handle.id.get(),
-                    };
-                    queue.write_buffer(
-                        &instance_buffer.buffer,
-                        (index as usize * std::mem::size_of::<Instance>()) as u64,
-                        bytemuck::cast_slice(&[instance_buffer.staging[index as usize]]),
-                    );
-                } else {
-                    // Add a new instance
-                    let instance_buffer = self.instance_buffers[area.area.z.to_usize()]
-                        .get_or_insert_with(|| {
-                            let buffer = device.create_buffer(&BufferDescriptor {
-                                label: Some("Instance Buffer"),
-                                size: 128 * std::mem::size_of::<Instance>() as u64,
-                                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            });
-                            InstanceBuffer {
-                                staging: Vec::new(),
-                                order: Vec::new(),
-                                buffer,
-                                capacity: 128 * std::mem::size_of::<Instance>() as u32,
-                                size: 0,
-                            }
-                        });
-                    let Some(sprite_index) =
-                        self.sprite_indices.get(area.area.sprite.as_ref().unwrap())
-                    else {
-                        unreachable!("Sprite: {:?} not registered", area.area.sprite);
-                    };
-                    if instance_buffer.size == instance_buffer.capacity {
-                        // Resize the buffer
-                        let new_capacity = instance_buffer.capacity * 2;
-                        let new_buffer = device.create_buffer(&BufferDescriptor {
-                            label: Some("Instance Buffer"),
-                            size: new_capacity as u64 * std::mem::size_of::<Instance>() as u64,
-                            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                        queue.write_buffer(
-                            &new_buffer,
-                            0,
-                            bytemuck::cast_slice(&instance_buffer.staging),
-                        );
-                        instance_buffer.capacity = new_capacity;
-                        instance_buffer.buffer = new_buffer;
-                    }
-                    instance_buffer.staging.push(Instance {
-                        sprite_index: *sprite_index,
-                        x_min: area.area.x_min,
-                        x_max: area.area.x_max,
-                        y_min: area.area.y_min,
-                        y_max: area.area.y_max,
-                        area_id: handle.id.get(),
+        // Upload data to gpu
+        queue.write_buffer(&self.offset_table, 0, cast_slice(&offset_table));
+        queue.write_buffer(&self.allocation_table, 0, cast_slice(&allocation_table));
+    }
+
+    fn update_render_data(&mut self, device: &Device, queue: &Queue) {
+        if self.dirty_elements.is_empty() {
+            return;
+        }
+
+        // TEMPORARY SOLUTION: Rebuild all instances and text
+        self.instances.clear();
+
+        for (_id, element) in &self.elements {
+            if let Some(sprite) = element.sprite.as_ref() {
+                if let Some(offset_table_index) = self.sprite_to_offset_table_index.get(sprite) {
+                    let rect = &element.rectangle;
+                    let x_min = rect.top_left.x * 2.0 - 1.0;
+                    let x_max = rect.bottom_right.x * 2.0 - 1.0;
+                    let y_max = 1.0 - (rect.top_left.y * 2.0);
+                    let y_min = 1.0 - (rect.bottom_right.y * 2.0);
+
+                    self.instances.push(QuadInstance {
+                        sprite_index: *offset_table_index,
+                        x_min,
+                        x_max,
+                        y_min,
+                        y_max,
+                        frame_offset: element.frame_offset,
                     });
-                    instance_buffer.order.push(handle);
-                    area.instances_index = Some(instance_buffer.size);
-                    queue.write_buffer(
-                        &instance_buffer.buffer,
-                        (instance_buffer.size as usize * std::mem::size_of::<Instance>()) as u64,
-                        bytemuck::cast_slice(&[*instance_buffer.staging.last().unwrap()]),
-                    );
-                    instance_buffer.size += 1;
                 }
             }
         }
-    }
 
-    fn set_index_buffer(&mut self, device: &Device, amount_indices: usize) {
-        assert!(amount_indices % 6 == 0);
-        let mut indices: Vec<u16> = Vec::with_capacity(amount_indices);
-        for i in 0..amount_indices / 6 {
-            let i = i * 4;
-            indices.push(i as u16);
-            indices.push(i as u16 + 1);
-            indices.push(i as u16 + 2);
-            indices.push(i as u16);
-            indices.push(i as u16 + 2);
-            indices.push(i as u16 + 3);
+        if self.instance_buffer_capacity < self.instances.len() {
+            self.instance_buffer_capacity = self.instances.len().next_power_of_two();
+            self.instance_buffer = device.create_buffer(&BufferDescriptor {
+                label: Some("STGI Instance Buffer"),
+                size: (self.instance_buffer_capacity as u64)
+                    * std::mem::size_of::<QuadInstance>() as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
         }
-        self.index_buffer_size = indices.len() as u32;
-        self.index_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("STGI Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: BufferUsages::INDEX,
-        });
+        if !self.instances.is_empty() {
+            queue.write_buffer(&self.instance_buffer, 0, cast_slice(&self.instances));
+        }
+
+        // Update text
+        self.text_renderer
+            .update(device, queue, self.screen_size, self.elements.values());
+
+        self.dirty_elements.clear();
     }
 }
