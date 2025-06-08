@@ -98,6 +98,6 @@ fn fs_main(in: VertexOutput) -> @location(0) u32 {
     if sample.a < 0.05 {
         discard;
     } else {
-        return in.area_id;
+        return in.element_id;
     }
 }

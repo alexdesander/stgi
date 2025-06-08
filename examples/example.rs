@@ -24,9 +24,9 @@ struct State {
     last_animation_tick: Instant,
 
     // WGPU STUFF
-    instance: Instance,
+    _instance: Instance,
     surface: Surface<'static>,
-    adapter: Adapter,
+    _adapter: Adapter,
     device: Device,
     queue: Queue,
     surface_config: SurfaceConfiguration,
@@ -154,9 +154,9 @@ impl State {
         Self {
             stgi,
             last_animation_tick: Instant::now(),
-            instance,
+            _instance: instance,
             surface,
-            adapter,
+            _adapter: adapter,
             device,
             queue,
             surface_config,
@@ -169,7 +169,8 @@ impl State {
             self.surface_config.width = new_size.width;
             self.surface_config.height = new_size.height;
             self.surface.configure(&self.device, &self.surface_config);
-            self.stgi.resize(new_size.width, new_size.height);
+            self.stgi
+                .resize(&self.device, new_size.width, new_size.height);
         }
     }
 
@@ -187,7 +188,8 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
-        {
+
+        let picking_cmds = {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -208,10 +210,14 @@ impl State {
                 timestamp_writes: None,
             });
 
-            self.stgi.draw(&self.device, &self.queue, &mut render_pass);
-        }
-        self.queue.submit(std::iter::once(encoder.finish()));
+            self.stgi.draw(&self.device, &self.queue, &mut render_pass)
+        };
+
+        self.queue.submit([encoder.finish(), picking_cmds]);
         output.present();
+        self.stgi.post_render_work();
+
+        println!("Hovered: {:?}", self.stgi.currently_hovered_element());
 
         Ok(())
     }
@@ -249,6 +255,10 @@ impl ApplicationHandler for State {
                     Err(e) => eprintln!("{:?}", e),
                 }
                 self.window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.stgi
+                    .set_cursor_pos(&self.queue, position.x as u32, position.y as u32);
             }
             _ => {}
         }

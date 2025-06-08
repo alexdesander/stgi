@@ -10,8 +10,8 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coords: vec2<f32>,
     @location(1) @interpolate(flat) atlas_index: u32,
-    @location(2) color: vec4<f32>,
-    @location(3) element_id: u32,
+    @location(2) @interpolate(flat) color: vec4<f32>,
+    @location(3) @interpolate(flat) element_id: u32,
 };
 
 @vertex
@@ -21,7 +21,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.tex_coords = in.tex_coords;
     out.atlas_index = in.atlas_index;
     out.color = in.color;
-    out.area_id = in.area_id;
+    out.element_id = in.element_id;
     return out;
 }
 
@@ -36,5 +36,5 @@ fn fs_main(in: VertexOutput) -> @location(0) u32 {
     if sample.x < 0.0001 {
         discard;
     }
-    return in.area_id;
+    return in.element_id;
 }

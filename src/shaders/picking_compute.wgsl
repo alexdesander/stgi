@@ -15,10 +15,10 @@ var texture: texture_2d<u32>;
 
 @group(1)
 @binding(2)
-var<uniform> cursor_position: vec2<f32>;
+var<uniform> cursor_position: vec2<u32>;
 
 @compute
 @workgroup_size(1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    result[0] = textureLoad(texture, cursor_position, 0)[0];
+    result[0] = textureLoad(texture, cursor_position, 0).x;
 }

@@ -90,6 +90,7 @@ pub(crate) struct TextRenderer<F: Clone + Eq + Hash> {
     layout: Layout<[f32; 4]>,
 
     pipeline: RenderPipeline,
+    picking_pipeline: RenderPipeline,
     vertices: Vec<GlyphVertex>,
     vertex_buffer: Buffer,
     vertex_buffer_capacity: usize,
@@ -142,6 +143,40 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
             cache: None,
         });
 
+        let picking_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("STGI Text Picking Shader"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/picking_text.wgsl").into()),
+        });
+
+        let picking_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("STGI Text Picking Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &picking_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GlyphVertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &picking_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let vertex_buffer_capacity = 1024;
         let vertex_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("STGI Text Vertex Buffer"),
@@ -164,6 +199,7 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
             rasterized_glyphs: HashMap::default(),
             layout: Layout::new(CoordinateSystem::PositiveYDown),
             pipeline,
+            picking_pipeline,
             vertices: Vec::new(),
             vertex_buffer,
             vertex_buffer_capacity,
@@ -361,6 +397,17 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
             return;
         }
         render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.atlas.bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+        render_pass.draw_indexed(0..self.indices.len() as u32, 0, 0..1);
+    }
+
+    pub(crate) fn draw_picking<'pass>(&'pass self, render_pass: &mut RenderPass<'pass>) {
+        if self.indices.is_empty() {
+            return;
+        }
+        render_pass.set_pipeline(&self.picking_pipeline);
         render_pass.set_bind_group(0, &self.atlas.bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);

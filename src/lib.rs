@@ -1,4 +1,4 @@
-use std::{hash::Hash, num::NonZeroU32};
+use std::{hash::Hash, num::NonZeroU32, sync::Arc};
 
 use ahash::HashMap;
 use bytemuck::{Pod, Zeroable, cast_slice};
@@ -6,9 +6,10 @@ use image::RgbaImage;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, Buffer, BufferAddress, BufferBindingType, BufferUsages,
-    Device, IndexFormat, Queue, RenderPass, RenderPipeline, ShaderStages, TextureFormat,
-    VertexAttribute, VertexBufferLayout, VertexStepMode, util::DeviceExt, vertex_attr_array,
-    wgt::BufferDescriptor,
+    CommandBuffer, ComputePipeline, Device, Extent3d, IndexFormat, Operations, PollType, Queue,
+    RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, ShaderStages,
+    Texture, TextureFormat, TextureUsages, TextureView, VertexAttribute, VertexBufferLayout,
+    VertexStepMode, util::DeviceExt, vertex_attr_array, wgt::BufferDescriptor,
 };
 
 use crate::{
@@ -139,6 +140,21 @@ pub struct Stgi<S: Clone + Eq + Hash, F: Clone + Eq + Hash> {
     // Bind Groups
     tables_bind_group_layout: wgpu::BindGroupLayout,
     tables_bind_group: BindGroup,
+
+    // Picking
+    picking_texture: Texture,
+    picking_texture_view: TextureView,
+    sprite_picking_pipeline: RenderPipeline,
+    cursor_pos: [u32; 2],
+    cursor_pos_buffer: Buffer,
+    picking_compute_pipeline: ComputePipeline,
+    picking_result_storage_buffer: Buffer,
+    picking_result_staging_buffer: Arc<Buffer>,
+    picking_compute_bind_group_layout: wgpu::BindGroupLayout,
+    picking_compute_bind_group: BindGroup,
+    picking_result_sender: std::sync::mpsc::Sender<u32>,
+    picking_result_receiver: std::sync::mpsc::Receiver<u32>,
+    hovered_element: Option<UiElementHandle>,
 }
 
 impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
@@ -298,6 +314,169 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
             cache: None,
         });
 
+        // PICKING STUFF
+        let picking_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("STGI Picking Texture"),
+            size: wgpu::Extent3d {
+                width: screen_size.0,
+                height: screen_size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let picking_texture_view =
+            picking_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Sprite Picking Pipeline
+        let sprite_picking_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("STGI Sprite Picking Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/picking_render.wgsl").into()),
+        });
+        let sprite_picking_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("STGI Sprite Picking Pipeline"),
+                layout: Some(&render_pipeline_layout), // Can reuse layout
+                vertex: wgpu::VertexState {
+                    module: &sprite_picking_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Vertex::desc(), QuadInstance::desc()],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sprite_picking_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R32Uint,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Cw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        // Compute Picking Pipeline
+        let cursor_pos_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("STGI Cursor Pos Buffer"),
+            contents: bytemuck::cast_slice(&[0u32, 0u32]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let picking_result_storage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("STGI Picking Result Storage Buffer"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let picking_result_staging_buffer =
+            Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("STGI Picking Result Staging Buffer"),
+                size: 4,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+
+        let picking_compute_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("STGI Picking Compute BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let picking_compute_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("STGI Picking Compute BG"),
+            layout: &picking_compute_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: picking_result_storage_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&picking_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: cursor_pos_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let picking_compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("STGI Picking Compute Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/picking_compute.wgsl").into()),
+        });
+
+        let picking_compute_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("STGI Picking Compute Pipeline Layout"),
+                bind_group_layouts: &[
+                    &tables_bind_group_layout,
+                    &picking_compute_bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+
+        let picking_compute_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("STGI Picking Compute Pipeline"),
+                layout: Some(&picking_compute_pipeline_layout),
+                module: &picking_compute_shader,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+
+        let (picking_result_sender, picking_result_receiver) = std::sync::mpsc::channel();
+
         Self {
             screen_size,
             atlas,
@@ -325,13 +504,63 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
             frame_uniform_buffer,
             tables_bind_group_layout,
             tables_bind_group,
+            picking_texture,
+            picking_texture_view,
+            sprite_picking_pipeline,
+            cursor_pos: [0, 0],
+            cursor_pos_buffer,
+            picking_compute_pipeline,
+            picking_result_storage_buffer,
+            picking_result_staging_buffer,
+            picking_compute_bind_group_layout,
+            picking_compute_bind_group,
+            picking_result_sender,
+            picking_result_receiver,
+            hovered_element: None,
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
         self.screen_size = (width, height);
         // Mark all elements as dirty so text can be re-layouted
         self.dirty_elements.extend(self.elements.keys());
+
+        self.picking_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("STGI Picking Texture"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TextureFormat::R32Uint,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.picking_texture_view = self
+            .picking_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.picking_compute_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("STGI Picking Compute BG"),
+            layout: &self.picking_compute_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: self.picking_result_storage_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.picking_texture_view),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: self.cursor_pos_buffer.as_entire_binding(),
+                },
+            ],
+        });
     }
 
     pub fn add_font(&mut self, id: F, data: &'static [u8]) {
@@ -355,7 +584,7 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
         self.sprites.insert(
             sprite_id,
             Sprite {
-                raw_image,
+                _raw_image: raw_image,
                 allocations,
             },
         );
@@ -381,12 +610,42 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
         self.elements.get_mut(&id.id)
     }
 
+    pub fn set_cursor_pos(&mut self, queue: &Queue, x: u32, y: u32) {
+        self.cursor_pos = [x, y];
+        queue.write_buffer(
+            &self.cursor_pos_buffer,
+            0,
+            bytemuck::cast_slice(&self.cursor_pos),
+        );
+    }
+
+    pub fn currently_hovered_element(&self) -> Option<UiElementHandle> {
+        self.hovered_element
+    }
+
+    pub fn post_render_work(&mut self) {
+        let sender = self.picking_result_sender.clone();
+        let buffer = self.picking_result_staging_buffer.clone();
+        self.picking_result_staging_buffer.slice(..).map_async(
+            wgpu::MapMode::Read,
+            move |result| {
+                if result.is_ok() {
+                    let view = buffer.slice(..).get_mapped_range();
+                    let id = u32::from_ne_bytes(view[0..4].try_into().unwrap());
+                    let _ = sender.send(id);
+                    drop(view);
+                    buffer.unmap();
+                }
+            },
+        );
+    }
+
     pub fn draw<'pass>(
         &'pass mut self,
         device: &Device,
         queue: &Queue,
         render_pass: &mut RenderPass<'pass>,
-    ) {
+    ) -> CommandBuffer {
         if self.needs_table_rebuild {
             self.needs_table_rebuild = false;
             self.rebuild_tables(device, queue);
@@ -419,6 +678,84 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
 
         // Draw Text
         self.text_renderer.draw(render_pass);
+
+        // After main draw logic, create picking command buffer
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("STGI Picking Encoder"),
+        });
+
+        // Update picking result from previous frame
+        device.poll(PollType::Wait).unwrap();
+        let mut latest_id = None;
+        while let Ok(id) = self.picking_result_receiver.try_recv() {
+            latest_id = Some(id);
+        }
+        if let Some(id) = latest_id {
+            if let Some(id_nonzero) = NonZeroU32::new(id) {
+                if self.elements.contains_key(&id_nonzero) {
+                    self.hovered_element = Some(UiElementHandle { id: id_nonzero });
+                } else {
+                    self.hovered_element = None;
+                }
+            } else {
+                self.hovered_element = None;
+            }
+        }
+
+        // Picking Render Pass
+        {
+            let mut picking_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("STGI Picking Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &self.picking_texture_view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), // Clear with 0
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+
+            // Draw Sprites for picking
+            if !self.instances.is_empty() {
+                picking_pass.set_pipeline(&self.sprite_picking_pipeline);
+                picking_pass.set_bind_group(0, &self.tables_bind_group, &[]);
+                picking_pass.set_bind_group(1, &self.atlas.atlas_bind_group, &[]);
+                picking_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                picking_pass.set_index_buffer(self.index_buffer.slice(..), IndexFormat::Uint16);
+                picking_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+                picking_pass.draw_indexed(0..6, 0, 0..self.instances.len() as u32);
+            }
+
+            // Draw Text for picking
+            self.text_renderer.draw_picking(&mut picking_pass);
+        }
+
+        // Picking Compute Pass
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("STGI Picking Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.picking_compute_pipeline);
+            compute_pass.set_bind_group(0, &self.tables_bind_group, &[]);
+            compute_pass.set_bind_group(1, &self.picking_compute_bind_group, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // Copy result to staging buffer
+        encoder.copy_buffer_to_buffer(
+            &self.picking_result_storage_buffer,
+            0,
+            &self.picking_result_staging_buffer,
+            0,
+            4,
+        );
+
+        encoder.finish()
     }
 
     /// Rebuilds offset and allocation table
