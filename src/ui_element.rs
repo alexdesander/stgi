@@ -21,10 +21,11 @@ pub struct UiElement<S, F> {
     pub sprite: Option<S>,
     pub frame_offset: u32,
     pub text: Option<Text<F>>,
+    pub handle: UiElementHandle,
 }
 
 impl<S, F> UiElement<S, F> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(handle: UiElementHandle) -> Self {
         UiElement {
             rectangle: Rectangle {
                 top_left: Point::new(0.0, 0.0),
@@ -33,6 +34,7 @@ impl<S, F> UiElement<S, F> {
             sprite: None,
             frame_offset: 0,
             text: None,
+            handle,
         }
     }
 }

@@ -61,11 +61,11 @@ struct GlyphVertex {
     tex_coords: [f32; 2],
     atlas_index: u32,
     color: [f32; 4],
+    element_id: u32,
 }
 
 impl GlyphVertex {
-    const ATTRIBS: [VertexAttribute; 4] =
-        vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4];
+    const ATTRIBS: [VertexAttribute; 5] = vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Uint32, 3 => Float32x4, 4 => Uint32];
     fn desc() -> VertexBufferLayout<'static> {
         use std::mem;
         VertexBufferLayout {
@@ -290,6 +290,7 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
                                 tex_coords: [u_min, v_min],
                                 atlas_index: allocation.atlas_id,
                                 color: glyph.user_data,
+                                element_id: element.handle.id.into(),
                             },
                             GlyphVertex {
                                 // Bottom-left
@@ -297,6 +298,7 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
                                 tex_coords: [u_min, v_max],
                                 atlas_index: allocation.atlas_id,
                                 color: glyph.user_data,
+                                element_id: element.handle.id.into(),
                             },
                             GlyphVertex {
                                 // Bottom-right
@@ -304,6 +306,7 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
                                 tex_coords: [u_max, v_max],
                                 atlas_index: allocation.atlas_id,
                                 color: glyph.user_data,
+                                element_id: element.handle.id.into(),
                             },
                             GlyphVertex {
                                 // Top-right
@@ -311,6 +314,7 @@ impl<F: Clone + Eq + Hash> TextRenderer<F> {
                                 tex_coords: [u_max, v_min],
                                 atlas_index: allocation.atlas_id,
                                 color: glyph.user_data,
+                                element_id: element.handle.id.into(),
                             },
                         ]);
                         self.indices.extend_from_slice(&[

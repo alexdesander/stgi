@@ -77,10 +77,11 @@ struct QuadInstance {
     y_min: f32,
     y_max: f32,
     frame_offset: u32,
+    element_id: u32,
 }
 
 impl QuadInstance {
-    const ATTRIBS: [VertexAttribute; 6] = vertex_attr_array![1 => Uint32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32, 6 => Uint32];
+    const ATTRIBS: [VertexAttribute; 7] = vertex_attr_array![1 => Uint32, 2 => Float32, 3 => Float32, 4 => Float32, 5 => Float32, 6 => Uint32, 7 => Uint32];
     fn desc() -> VertexBufferLayout<'static> {
         use std::mem;
         VertexBufferLayout {
@@ -370,7 +371,7 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
     pub fn new_ui_element(&mut self) -> UiElementHandle {
         let id = UiElementHandle::new(self.next_id);
         self.next_id = self.next_id.checked_add(1).unwrap();
-        self.elements.insert(id.id, UiElement::new());
+        self.elements.insert(id.id, UiElement::new(id));
         self.dirty_elements.push(id.id);
         id
     }
@@ -512,7 +513,7 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
         // TEMPORARY SOLUTION: Rebuild all instances and text
         self.instances.clear();
 
-        for (_id, element) in &self.elements {
+        for (id, element) in &self.elements {
             if let Some(sprite) = element.sprite.as_ref() {
                 if let Some(offset_table_index) = self.sprite_to_offset_table_index.get(sprite) {
                     let rect = &element.rectangle;
@@ -528,6 +529,7 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
                         y_min,
                         y_max,
                         frame_offset: element.frame_offset,
+                        element_id: (*id).into(),
                     });
                 }
             }
