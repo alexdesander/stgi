@@ -96,6 +96,7 @@ impl QuadInstance {
 pub struct Stgi<S: Clone + Eq + Hash, F: Clone + Eq + Hash> {
     // General
     screen_size: (u32, u32),
+    just_cleared: bool,
 
     // Sprites
     atlas: Atlas,
@@ -479,6 +480,7 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
 
         Self {
             screen_size,
+            just_cleared: false,
             atlas,
             sprites: HashMap::default(),
             render_pipeline,
@@ -524,6 +526,7 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
         self.dirty_elements.clear();
         self.elements.clear();
         self.rebuild_tables(device, queue);
+        self.just_cleared = true;
     }
 
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
@@ -849,9 +852,10 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
     }
 
     fn update_render_data(&mut self, device: &Device, queue: &Queue) {
-        if self.dirty_elements.is_empty() {
+        if self.dirty_elements.is_empty() && !self.just_cleared {
             return;
         }
+        self.just_cleared = false;
 
         // TEMPORARY SOLUTION: Rebuild all instances and text
         self.instances.clear();
