@@ -520,6 +520,12 @@ impl<S: Clone + Eq + Hash, F: Clone + Eq + Hash> Stgi<S, F> {
         }
     }
 
+    pub fn clear(&mut self, device: &Device, queue: &Queue) {
+        self.dirty_elements.clear();
+        self.elements.clear();
+        self.rebuild_tables(device, queue);
+    }
+
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) {
         self.screen_size = (width, height);
         // Mark all elements as dirty so text can be re-layouted
