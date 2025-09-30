@@ -1,4 +1,7 @@
-use guillotiere::{Allocation, AtlasAllocator, euclid::Size2D};
+use guillotiere::{
+    SimpleAtlasAllocator,
+    euclid::{Box2D, Size2D, UnknownUnit},
+};
 use image::RgbaImage;
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -10,28 +13,33 @@ use wgpu::{
 };
 
 pub struct AtlasAllocation {
-    pub atlas_id: u32,
-    pub allocation: Allocation,
+    pub atlas_index: u32,
+    pub allocation: Box2D<i32, UnknownUnit>,
 }
 
-/// A texture atlas using a 2D array texture.
 pub struct Atlas {
-    pub size: Size2D<i32, i32>,
-    pub allocators: Vec<AtlasAllocator>,
-    pub texture: Texture,
-    pub texture_view: TextureView,
-    pub sampler: Sampler,
+    size: u32,
+    allocators: Vec<SimpleAtlasAllocator>,
+    texture: Texture,
+    texture_view: TextureView,
+    sampler: Sampler,
     pub atlas_bind_group_layout: BindGroupLayout,
     pub atlas_bind_group: BindGroup,
 }
 
 impl Atlas {
-    pub fn new(width: u32, height: u32, device: &Device) -> Self {
+    pub fn new(device: &Device) -> Self {
+        let size = 4096.min(device.limits().max_texture_dimension_2d);
+        let allocators = vec![SimpleAtlasAllocator::new(Size2D::new(
+            size as i32,
+            size as i32,
+        ))];
+
         let texture = device.create_texture(&TextureDescriptor {
-            label: Some("STGI Atlas Texture"),
+            label: Some("STGI Sprite Atlas Texture"),
             size: Extent3d {
-                width,
-                height,
+                width: size,
+                height: size,
                 depth_or_array_layers: 2,
             },
             mip_level_count: 1,
@@ -46,7 +54,7 @@ impl Atlas {
         });
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&SamplerDescriptor {
-            label: Some("STGI Atlas Sampler"),
+            label: Some("STGI Sprite Atlas Sampler"),
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
             address_mode_w: AddressMode::ClampToEdge,
@@ -55,12 +63,13 @@ impl Atlas {
             mipmap_filter: FilterMode::Nearest,
             ..Default::default()
         });
+
         let atlas_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("STGI Atlas Bind Group Layout"),
+            label: Some("STGI Sprite Atlas Bind Group Layout"),
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Texture {
                         multisampled: false,
                         view_dimension: TextureViewDimension::D2Array,
@@ -70,7 +79,7 @@ impl Atlas {
                 },
                 BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -91,14 +100,8 @@ impl Atlas {
             ],
         });
 
-        // We start with two so the texture becomes a 2D array texture.
-        let allocators = vec![
-            AtlasAllocator::new(Size2D::new(width as i32, height as i32)),
-            AtlasAllocator::new(Size2D::new(width as i32, height as i32)),
-        ];
-
         Self {
-            size: Size2D::new(width as i32, height as i32),
+            size,
             allocators,
             texture,
             texture_view,
@@ -108,108 +111,90 @@ impl Atlas {
         }
     }
 
-    pub fn remove_sprite(&mut self, allocation: &AtlasAllocation) {
-        self.allocators[allocation.atlas_id as usize].deallocate(allocation.allocation.id);
-    }
-
-    /// Inserts an image into the atlas, treating it as a horizontal strip of animation frames.
-    /// Returns a vector of allocations, one for each frame.
     pub fn insert_sprite(
         &mut self,
         device: &Device,
         queue: &Queue,
         image: &RgbaImage,
-        frames: usize,
-    ) -> Vec<AtlasAllocation> {
-        let mut allocations = Vec::with_capacity(frames);
-        if frames == 0 {
-            return allocations;
+    ) -> AtlasAllocation {
+        // --- 1.  Try to allocate in the current layers -------------------------------------------
+        let sprite_size = Size2D::new(image.width() as i32, image.height() as i32);
+
+        let mut atlas_index = 0;
+        let mut allocation = None;
+
+        for (layer_idx, allocator) in self.allocators.iter_mut().enumerate() {
+            if let Some(a) = allocator.allocate(sprite_size) {
+                atlas_index = layer_idx;
+                allocation = Some(a);
+                break;
+            }
         }
 
-        let frame_width = image.width() / frames as u32;
-        const PADDING: i32 = 1;
-        let sprite_size = Size2D::new(
-            frame_width as i32 + PADDING * 2,
-            image.height() as i32 + PADDING * 2,
+        // --- 2.  If no space was found, grow the atlas (adds a new layer) and retry --------------
+        let allocation = match allocation {
+            Some(a) => a,
+            None => {
+                self.grow(device, queue);
+                atlas_index = self.allocators.len() - 1;
+                let allocator = self.allocators.last_mut().unwrap();
+                allocator
+                    .allocate(sprite_size)
+                    .expect("allocation must succeed immediately after grow")
+            }
+        };
+
+        // --- 3.  Upload the pixel data to the correct (x, y, z-layer) region ---------------------
+        let origin = Origin3d {
+            x: allocation.min.x as u32,
+            y: allocation.min.y as u32,
+            z: atlas_index as u32,
+        };
+
+        // Raw RGBA bytes from `image`
+        let raw = image.as_raw();
+        let width = image.width() as usize;
+        let height = image.height() as usize;
+        let row_bytes = width * 4;
+
+        queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin,
+                aspect: TextureAspect::All,
+            },
+            raw,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row_bytes as u32),
+                rows_per_image: Some(height as u32),
+            },
+            Extent3d {
+                width: width as u32,
+                height: height as u32,
+                depth_or_array_layers: 1,
+            },
         );
 
-        let mut first_atlas_to_try = 0;
-        let mut current_frame = 0;
-        while current_frame < frames {
-            let mut allocation_successful = false;
-            for (atlas_id, allocator) in self
-                .allocators
-                .iter_mut()
-                .enumerate()
-                .skip(first_atlas_to_try)
-            {
-                if let Some(allocation) = allocator.allocate(sprite_size) {
-                    let atlas_allocation = AtlasAllocation {
-                        atlas_id: atlas_id as u32,
-                        allocation,
-                    };
-
-                    // Correctly upload the sub-image for the current frame.
-                    let bytes_per_pixel = 4;
-                    queue.write_texture(
-                        TexelCopyTextureInfo {
-                            texture: &self.texture,
-                            mip_level: 0,
-                            origin: Origin3d {
-                                x: (atlas_allocation.allocation.rectangle.min.x + PADDING) as u32,
-                                y: (atlas_allocation.allocation.rectangle.min.y + PADDING) as u32,
-                                z: atlas_allocation.atlas_id,
-                            },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        image.as_raw(),
-                        TexelCopyBufferLayout {
-                            offset: (current_frame as u32 * frame_width * bytes_per_pixel) as u64,
-                            bytes_per_row: Some(bytes_per_pixel * image.width()),
-                            rows_per_image: Some(image.height()),
-                        },
-                        Extent3d {
-                            width: frame_width,
-                            height: image.height(),
-                            depth_or_array_layers: 1,
-                        },
-                    );
-
-                    allocations.push(atlas_allocation);
-                    allocation_successful = true;
-                    current_frame += 1;
-                    break;
-                }
-                first_atlas_to_try += 1;
-            }
-
-            // If we went through all atlases and couldn't find space, we need a new one.
-            if !allocation_successful {
-                if sprite_size.width > self.size.width || sprite_size.height > self.size.height {
-                    panic!(
-                        "STGI Atlas size ({:?}) is not large enough to fit a sprite frame with size: {:?}. Consider increasing atlas size.",
-                        self.size, sprite_size
-                    );
-                }
-                self.increase_atlas_depth(device, queue);
-            }
+        AtlasAllocation {
+            atlas_index: atlas_index as u32,
+            allocation,
         }
-
-        allocations
     }
 
-    fn increase_atlas_depth(&mut self, device: &Device, queue: &Queue) {
-        self.allocators.push(AtlasAllocator::new(Size2D::new(
-            self.size.width as i32,
-            self.size.height as i32,
+    fn grow(&mut self, device: &Device, queue: &Queue) {
+        self.allocators.push(SimpleAtlasAllocator::new(Size2D::new(
+            self.size as i32,
+            self.size as i32,
         )));
 
         let new_texture = device.create_texture(&TextureDescriptor {
-            label: Some("STGI Atlas Texture"),
+            label: Some("STGI Sprite Atlas Texture"),
             size: Extent3d {
                 width: self.texture.width(),
                 height: self.texture.height(),
-                depth_or_array_layers: self.texture.depth_or_array_layers() + 1,
+                depth_or_array_layers: self.allocators.len() as u32,
             },
             mip_level_count: self.texture.mip_level_count(),
             sample_count: self.texture.sample_count(),
@@ -236,7 +221,7 @@ impl Atlas {
             Extent3d {
                 width: self.texture.width(),
                 height: self.texture.height(),
-                depth_or_array_layers: self.texture.depth_or_array_layers(),
+                depth_or_array_layers: self.allocators.len() as u32 - 1,
             },
         );
         self.texture = new_texture;
@@ -244,7 +229,7 @@ impl Atlas {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.atlas_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("STGI Atlas Bind Group"),
+            label: Some("STGI Sprite Atlas Bind Group"),
             layout: &self.atlas_bind_group_layout,
             entries: &[
                 BindGroupEntry {
